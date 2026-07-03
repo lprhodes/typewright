@@ -77,6 +77,29 @@ test('XSS: a javascript: link is neutralized', async ({ page }) => {
   expect(href).not.toContain('javascript:');
 });
 
+test('unified: editing a block that adds a split does not corrupt other blocks', async ({ page }) => {
+  // set a known document via edit mode
+  await page.locator('button[data-mode="edit"]').click();
+  await page.getByTestId('editor').locator('textarea').fill('# Title\n\npara1\n\npara2');
+  await page.locator('button[data-mode="unified"]').click();
+  const editor = page.getByTestId('editor');
+
+  // edit the heading block, introducing a paragraph split (changes block count)
+  await editor.locator('.tw-block', { hasText: 'Title' }).click();
+  await editor.locator('textarea.tw-source').fill('# Title\n\nNEW');
+  // switch directly to the para2 block (no blur elsewhere), then commit
+  await editor.locator('.tw-block', { hasText: 'para2' }).click();
+  await editor.locator('.tw-block', { hasText: 'Title' }).click();
+
+  // read the raw value back
+  await page.locator('button[data-mode="edit"]').click();
+  const val = await page.getByTestId('editor').locator('textarea').inputValue();
+  expect(val).toContain('NEW');
+  expect(val).toContain('para1'); // not destroyed
+  expect((val.match(/para2/g) ?? []).length).toBe(1); // not duplicated
+  expect(val).toMatch(/NEW[\s\S]*para1[\s\S]*para2/); // order preserved
+});
+
 test('streaming anticipates then resolves', async ({ page }) => {
   await page.getByTestId('play-stream').click();
   const stream = page.getByTestId('stream');

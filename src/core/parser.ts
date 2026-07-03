@@ -663,8 +663,12 @@ function parseInlineSegs(segs: Seg[]): Inline[] {
 
   /** Index of the `]` matching the `[` at `open`, or -1. */
   function matchLabel(open: number, end: number): number {
+    // Bound the forward scan: link labels/text are short in practice, and an
+    // unbounded scan from every `[` makes a run of unmatched brackets O(n^2)
+    // (parse runs on every keystroke / streamed token).
+    const stop = Math.min(end, open + 4096);
     let depth = 0;
-    for (let k = open; k < end; k++) {
+    for (let k = open; k < stop; k++) {
       const ch = buf[k];
       if (ch === '\\') {
         k++;

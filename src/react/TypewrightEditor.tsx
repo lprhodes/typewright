@@ -181,30 +181,45 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
   const doc = React.useMemo(() => parse(md), [md]);
   const blocks = doc.children;
 
-  const commit = React.useCallback(() => {
+  const commit = React.useCallback((): { next: string; change: DocChange | null } => {
     const a = activeRef.current;
-    if (a === null) return;
-    const b = parse(mdRef.current).children[a];
-    if (b) {
-      const next = mdRef.current.slice(0, b.from) + draftRef.current + mdRef.current.slice(b.to);
-      commitValue(next, { from: b.from, to: b.to, insert: draftRef.current });
-    }
+    const src = mdRef.current;
     activeRef.current = null;
     setActive(null);
+    if (a === null) return { next: src, change: null };
+    const b = parse(src).children[a];
+    if (!b) return { next: src, change: null };
+    const next = src.slice(0, b.from) + draftRef.current + src.slice(b.to);
+    const change: DocChange = { from: b.from, to: b.to, insert: draftRef.current };
+    if (next !== src) commitValue(next, change);
+    mdRef.current = next; // keep the ref consistent for an immediate re-activation
+    return { next, change };
   }, [mdRef, commitValue]);
 
+  // Activate the block the user clicked (identified by its source OFFSET) after
+  // committing any in-progress edit — the offset is mapped through that commit so
+  // a block-count-changing edit can never target the wrong block (data-loss bug).
   const activate = React.useCallback(
-    (idx: number) => {
+    (clickedFrom: number) => {
       if (readOnly) return;
-      const src = mdRef.current;
-      const b = parse(src).children[idx];
-      commit();
+      const { next, change } = commit();
+      let mapped = clickedFrom;
+      if (change && clickedFrom >= change.to) {
+        mapped = clickedFrom + (change.insert.length - (change.to - change.from));
+      }
+      const nextBlocks = parse(next).children;
+      let idx = nextBlocks.findIndex((bl) => mapped >= bl.from && mapped < bl.to);
+      if (idx < 0) idx = nextBlocks.findIndex((bl) => bl.from === mapped);
+      const b = nextBlocks[idx];
       if (b) {
-        setDraft(src.slice(b.from, b.to));
+        const d = next.slice(b.from, b.to);
+        draftRef.current = d;
+        setDraft(d);
+        activeRef.current = idx;
         setActive(idx);
       }
     },
-    [commit, mdRef, readOnly],
+    [commit, readOnly],
   );
 
   // which block indices are hidden by a folded ancestor heading
@@ -290,12 +305,12 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
                 onMouseDown={(e) => {
                   if (readOnly) return;
                   e.preventDefault();
-                  activate(i);
+                  activate(b.from);
                 }}
                 onKeyDown={(e) => {
                   if (!readOnly && (e.key === 'Enter' || e.key === ' ')) {
                     e.preventDefault();
-                    activate(i);
+                    activate(b.from);
                   }
                 }}
                 // sanitized by render.ts

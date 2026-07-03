@@ -37,7 +37,14 @@ function normalizeOpt(o: AnticipationOptions | boolean): Opt {
 }
 
 function esc(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // escapes text AND attribute values (the fence language class, component name),
+  // so `"`/`'` must be escaped too — this is a security boundary.
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 /** Inline HTML for a single line via the real renderer (no <p> wrapper). */

@@ -76,4 +76,10 @@ describe('anticipate', () => {
       expect(() => anticipate(s)).not.toThrow();
     }
   });
+
+  it('escapes quotes in the fence language attribute (no attribute breakout)', () => {
+    const r = anticipate('```a"onmouseover=alert(1) x\ncode');
+    expect(r.html).not.toContain('"onmouseover='); // raw breakout blocked
+    expect(r.html).toContain('&quot;'); // the quote is escaped
+  });
 });
