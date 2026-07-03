@@ -125,4 +125,36 @@ stream" control animates the anticipation behaviour; toggles flip features live.
 
 ## Progress
 
-_(updated by later phases)_
+**v0.1.0 — shipped to `main` (2026-07-04).** Ran the ship-feature pipeline
+(adapted for this standalone repo): design representation → spec → plan → work →
+gap-fix → e2e → merge.
+
+**Shipped (real, tested):**
+- `typewright/core` — `TextDoc` model (transactions + position mapping), a
+  hand-written **GFM parser** producing an offset-exact AST, a **sanitizing**
+  HTML renderer (the XSS boundary — escaping + `safeUrl` scheme allowlist; raw
+  HTML/MDX escaped, never emitted), unified-mode marker logic, and heading fold
+  ranges.
+- `typewright/streaming` — the **anticipation** renderer (parity-based
+  open-delimiter detection: partial `**bo` → pending bold, open ``` → code
+  block, forming `<Comp` → skeleton; confirmed content never reflows).
+- `typewright` — a functional `<TypewrightEditor>` (edit / **unified**
+  block-level click-to-edit-source live preview / preview / read, folding,
+  standard shortcuts, drop-in with injected styles) and `<StreamingPreview>`.
+- **Gates:** 129 unit tests, 9 Playwright e2e (green twice), typecheck + tsup
+  build (ESM+CJS+dts) all green.
+- **Security/correctness:** an independent adversarial review found 3 defects
+  (XSS in the stream escaper, unified-edit data-loss on block-count-changing
+  edits, parser O(n²) on unmatched brackets) — all **fixed with regression
+  coverage**; `render.ts`/`safeUrl` probed clean.
+
+**Deferred (represented in `demo/`, not yet built — SPEC.md §15 later phases):**
+character-level inline marker reveal (C1 at char granularity), custom
+virtualization + full IME/bidi hardening, MDX JSX **sandbox execution** (C12
+renders MDX as escaped source for now — the safety boundary), Mermaid + math
+rendering, the in-place table WYSIWYG grid (C7 renders tables read-only), and
+the comments/collaboration + presence backend (C20–C23). These are the honest
+next phases; the API surface already reserves their options.
+
+**Status:** Done (v0.1.0 core slice). Follow-on phases tracked in
+[plan-TW-0001.md](../plans/plan-TW-0001.md) §15.

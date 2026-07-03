@@ -1,6 +1,6 @@
 {
   "name": "typewright",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "A blazing-fast, from-scratch GitHub Flavored Markdown + MDX editor and streaming previewer for the web. Zero-runtime-dependency engine, Obsidian-style unified live preview, semantic folding, in-place tables, and LLM token-stream rendering that anticipates formatting as it arrives.",
   "type": "module",
   "license": "MIT",

@@ -12,8 +12,18 @@ Zero-runtime-dependency engine · Obsidian-style unified live preview · semanti
 
 </div>
 
-> [!WARNING]
-> **Pre-alpha.** This repository currently contains the full **[architecture specification](./SPEC.md)**, the public **API contract** (`src/types.ts`), and a scaffold. The high-performance engine is being built to the spec. The shipped `<TypewrightEditor>` renders a labelled `<textarea>` fallback until the engine lands — the API it exposes is stable, the internals are not there yet. Follow [SPEC.md](./SPEC.md) for the design and roadmap.
+> [!NOTE]
+> **Alpha (v0.1.0).** The core engine is real and tested: a from-scratch,
+> zero-runtime-dependency GFM parser → offset-exact AST → **sanitizing** HTML
+> renderer, unified-mode + fold services, and a streaming **anticipation**
+> renderer — all wired into working `<TypewrightEditor>` and `<StreamingPreview>`
+> components (129 unit tests + 9 Playwright e2e; an independent adversarial
+> security/correctness review passed after fixes). Still **deferred** (see
+> [SPEC.md §15](./SPEC.md#15-roadmap)) and represented in the interactive
+> [`demo/`](./demo/index.html): character-level inline marker reveal, custom
+> virtualization + full IME, MDX JSX **sandbox execution**, Mermaid, the in-place
+> table WYSIWYG grid, and comments/collaboration. The public API (`src/types.ts`)
+> is stable and semver-versioned.
 
 ---
 
