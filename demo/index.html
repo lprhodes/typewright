@@ -158,9 +158,9 @@
 
   /* editor + floating toolbar */
   .editor { position: relative; overflow: auto; max-height: 660px; }
-  .toolbar { position: sticky; top: 11px; z-index: 15; display: flex; align-items: center; gap: 5px; flex-wrap: wrap; margin: 11px 16px 3px; padding: 6px 8px; background: var(--glass); backdrop-filter: blur(26px) saturate(1.8); -webkit-backdrop-filter: blur(26px) saturate(1.8); border: 1px solid var(--line-2); border-radius: 15px; box-shadow: 0 14px 38px -12px rgba(0,0,0,.55), 0 3px 10px -4px rgba(0,0,0,.35), inset 0 1px 0 var(--glass-hi); }
+  .toolbar { position: sticky; top: 11px; z-index: 15; display: flex; align-items: center; justify-content: center; gap: 5px; flex-wrap: wrap; margin: 11px 16px 3px; padding: 6px 8px; background: var(--glass); backdrop-filter: blur(26px) saturate(1.8); -webkit-backdrop-filter: blur(26px) saturate(1.8); border: 1px solid var(--line-2); border-radius: 15px; box-shadow: 0 4px 14px -6px rgba(0,0,0,.26), inset 0 1px 0 var(--glass-hi); }
   .toolbar.float { max-height: 0; margin-top: 0; margin-bottom: 0; padding-top: 0; padding-bottom: 0; opacity: 0; transform: translateY(-9px) scale(.98); overflow: hidden; pointer-events: none; border-color: transparent; box-shadow: none; transition: max-height .3s var(--ease), opacity .22s, transform .26s var(--ease), margin .3s var(--ease), padding .3s var(--ease); }
-  .editor.tb-active .toolbar.float { max-height: 160px; margin-top: 12px; margin-bottom: 3px; padding-top: 6px; padding-bottom: 6px; opacity: 1; transform: none; pointer-events: auto; border-color: var(--line-2); box-shadow: 0 14px 38px -12px rgba(0,0,0,.55), 0 3px 10px -4px rgba(0,0,0,.35), inset 0 1px 0 var(--glass-hi); }
+  .editor.tb-active .toolbar.float { max-height: 160px; margin-top: 12px; margin-bottom: 3px; padding-top: 6px; padding-bottom: 6px; opacity: 1; transform: none; pointer-events: auto; border-color: var(--line-2); box-shadow: 0 4px 14px -6px rgba(0,0,0,.26), inset 0 1px 0 var(--glass-hi); }
   .toolbar.docked { position: sticky; top: 0; margin: 0; border-radius: 0; border-width: 0 0 1px; border-bottom-color: var(--line); box-shadow: none; max-height: none; opacity: 1; }
   .tgrp { display: inline-flex; gap: 2px; align-items: center; }
   .tsep { width: 1px; height: 20px; background: var(--line-2); margin: 0 5px; }
@@ -175,8 +175,10 @@
   .tbtn .cv { width: 9px; height: 9px; opacity: .6; }
   .tgrp.ctx { transition: opacity .2s; }
 
-  .doc { display: grid; grid-template-columns: 52px 1fr; padding: 18px 26px 60px 8px; transition: padding-top .2s var(--ease); }
-  .doc.read { grid-template-columns: 0 1fr; padding-left: 26px; }
+  .doc { display: flex; flex-direction: column; padding: 18px 26px 60px 8px; }
+  .row { display: grid; grid-template-columns: 52px 1fr; will-change: transform; }
+  .doc.read { padding-left: 26px; }
+  .doc.read .row { grid-template-columns: 0 1fr; }
   .gutter { position: relative; }
   .g-inner { display: flex; justify-content: flex-end; padding-top: 3px; padding-right: 8px; }
 
@@ -186,8 +188,9 @@
 
   .block { padding: 3px 0; position: relative; min-width: 0; }
   .doc.unified .block.clickable { cursor: text; border-radius: 6px; }
-  .doc.unified .block.clickable:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
-  .block.active { background: var(--accent-soft) !important; box-shadow: inset 2px 0 0 var(--accent); border-radius: 6px; }
+  .doc.unified .block.clickable { border-radius: 6px; transition: background .16s; }
+  .doc.unified .block.clickable:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+  .block.active { background: transparent; box-shadow: none; }
 
   .h1 { font-size: 28px; font-weight: 680; letter-spacing: -0.02em; margin: 12px 0 6px; font-family: var(--disp); }
   .h2 { font-size: 22px; font-weight: 660; letter-spacing: -0.02em; margin: 18px 0 6px; }
@@ -199,7 +202,7 @@
   .math { font-style: italic; letter-spacing: .01em; background: var(--accent-soft); padding: 1px 6px; border-radius: 5px; }
   .cmark { background: var(--cmark); border-bottom: 2px solid var(--cmark-line); border-radius: 3px; padding: 0 1px; cursor: pointer; }
   .rcursor { position: relative; display: inline-block; width: 2px; height: 1.05em; background: var(--warn); vertical-align: text-bottom; margin: 0 2px; }
-  .rcursor::after { content: attr(data-name); position: absolute; top: -17px; left: -2px; font-size: 10px; font-weight: 600; color: #0b0d0f; background: var(--warn); padding: 1px 5px; border-radius: 4px 4px 4px 0; white-space: nowrap; }
+  .rcursor::after { content: attr(data-name); position: absolute; top: -17px; left: -2px; font-size: 10px; font-weight: 600; color: #fff; background: color-mix(in srgb, var(--warn) 82%, #000); padding: 1px 5px; border-radius: 4px 4px 4px 0; white-space: nowrap; }
 
   .tasks { margin: 6px 0; display: flex; flex-direction: column; gap: 6px; }
   .task { display: flex; align-items: flex-start; gap: 10px; font-size: 15px; }
@@ -658,9 +661,28 @@
       var cls = 'block';
       if (state.mode === 'unified' && b.id !== state.activeId) cls += ' clickable';
       if (state.mode === 'unified' && b.id === state.activeId) cls += ' active';
-      html += '<div class="row" style="display:contents"><div class="gutter"><div class="g-inner">' + g + '</div></div><div class="' + cls + '" data-block="' + b.id + '">' + inner + '</div></div>';
+      html += '<div class="row" data-row="' + b.id + '"><div class="gutter"><div class="g-inner">' + g + '</div></div><div class="' + cls + '" data-block="' + b.id + '">' + inner + '</div></div>';
     }
     doc.innerHTML = html;
+  }
+
+  // FLIP: re-render then animate rows sliding to their new positions (so the
+  // height change from revealing a line's raw Markdown doesn't jump content).
+  function renderDocAnimated() {
+    var doc = $('#doc'), rows = doc.querySelectorAll('.row[data-row]'), first = {}, i;
+    for (i = 0; i < rows.length; i++) first[rows[i].getAttribute('data-row')] = rows[i].getBoundingClientRect().top;
+    renderDoc();
+    var rows2 = doc.querySelectorAll('.row[data-row]'), moved = [];
+    for (i = 0; i < rows2.length; i++) {
+      var el = rows2[i], f = first[el.getAttribute('data-row')];
+      if (f == null) continue;
+      var dy = f - el.getBoundingClientRect().top;
+      if (Math.abs(dy) > 0.5) { el.style.transform = 'translateY(' + dy + 'px)'; el.style.transition = 'none'; moved.push(el); }
+    }
+    if (!moved.length) return;
+    void doc.offsetWidth;
+    requestAnimationFrame(function () { moved.forEach(function (el) { el.style.transition = 'transform .32s var(--ease)'; el.style.transform = ''; }); });
+    setTimeout(function () { moved.forEach(function (el) { el.style.transition = ''; el.style.transform = ''; }); }, 380);
   }
 
   /* ---------- toolbar ---------- */
@@ -692,10 +714,14 @@
     tb.innerHTML = html;
     updateTbActive();
   }
+  var lastPt = { x: -1, y: -1 };
+  function anyPopupOpen() { return $('#foldmenu').classList.contains('show') || $('#selpop').classList.contains('show') || $('#composer').classList.contains('show'); }
+  function pointInEditor() { var r = $('#editor').getBoundingClientRect(); return lastPt.x >= r.left && lastPt.x <= r.right && lastPt.y >= r.top && lastPt.y <= r.bottom; }
   function updateTbActive() {
-    var ed = $('#editor');
-    var active = state.toolbar === 'docked' || state.focus || state.hover;
-    ed.classList.toggle('tb-active', active);
+    // A popup floating over the editor keeps the toolbar pinned even though the
+    // pointer has technically left the .editor box (the popup is position:fixed).
+    var active = state.toolbar === 'docked' || state.focus || state.hover || anyPopupOpen();
+    $('#editor').classList.toggle('tb-active', active);
   }
 
   /* ---------- props ---------- */
@@ -753,9 +779,9 @@
     pop.innerHTML = levels + '<div class="pop-sep"></div><button class="pop-item" data-act="toggle"><span class="chk"></span><span class="lab">Toggle Folding</span></button><button class="pop-item" data-act="foldall"><span class="chk"></span><span class="lab">Fold All Headers</span></button><button class="pop-item" data-act="unfoldall"><span class="chk"></span><span class="lab">Unfold All Headers</span></button><div class="pop-sep"></div><button class="pop-item" data-act="copy"><span class="chk"></span><span class="lab">Copy Link to here</span></button>';
     var r = anchor.getBoundingClientRect();
     pop.style.left = Math.min(r.left, window.innerWidth - 250) + 'px'; pop.style.top = (r.bottom + 6) + 'px';
-    pop.classList.add('show'); document.querySelectorAll('.foldctl').forEach(function (f) { f.classList.remove('open'); }); anchor.classList.add('open');
+    pop.classList.add('show'); document.querySelectorAll('.foldctl').forEach(function (f) { f.classList.remove('open'); }); anchor.classList.add('open'); updateTbActive();
   }
-  function closeFoldMenu() { $('#foldmenu').classList.remove('show'); menuFor = null; document.querySelectorAll('.foldctl').forEach(function (f) { f.classList.remove('open'); }); }
+  function closeFoldMenu() { $('#foldmenu').classList.remove('show'); menuFor = null; document.querySelectorAll('.foldctl').forEach(function (f) { f.classList.remove('open'); }); state.hover = pointInEditor(); updateTbActive(); }
 
   /* ---------- selection -> comment ---------- */
   var lastText = '', lastRect = null;
@@ -773,10 +799,10 @@
       sp.innerHTML = '<button class="tbtn b" data-selfmt="bold" title="Bold">B</button><button class="tbtn i" data-selfmt="italic" title="Italic">I</button><button class="tbtn" data-selfmt="link" title="Link">' + TI.link + '</button><button class="tbtn" data-selfmt="highlight" title="Highlight">' + TI.hl + '</button><span class="tsep"></span><button class="tbtn primary" data-selcomment="1">💬 Comment</button>';
       sp.style.left = Math.max(10, Math.min(lastRect.left + lastRect.width / 2 - 90, window.innerWidth - 200)) + 'px';
       sp.style.top = (lastRect.top - 44) + 'px';
-      sp.classList.add('show');
+      sp.classList.add('show'); updateTbActive();
     }, 10);
   }
-  function hideSel() { $('#selpop').classList.remove('show'); }
+  function hideSel() { $('#selpop').classList.remove('show'); state.hover = pointInEditor(); updateTbActive(); }
   function openComposer() {
     hideSel();
     var c = $('#composer');
@@ -784,9 +810,9 @@
     var left = Math.max(10, Math.min((lastRect ? lastRect.left : 200), window.innerWidth - 288));
     var top = (lastRect ? lastRect.bottom + 8 : 200);
     c.style.left = left + 'px'; c.style.top = top + 'px';
-    c.classList.add('show'); setTimeout(function () { var ta = $('textarea', c); if (ta) ta.focus(); }, 20);
+    c.classList.add('show'); updateTbActive(); setTimeout(function () { var ta = $('textarea', c); if (ta) ta.focus(); }, 20);
   }
-  function closeComposer() { $('#composer').classList.remove('show'); }
+  function closeComposer() { $('#composer').classList.remove('show'); state.hover = pointInEditor(); updateTbActive(); }
   function addComment(body) {
     var id = 't' + (Date.now() % 100000);
     COMMENTS.unshift({ id: id, quote: lastText.slice(0, 90), author: 'You', time: 'now', resolved: false, body: body, reactions: {}, myReacts: {}, replies: [] });
@@ -822,7 +848,7 @@
     var task = e.target.closest('[data-task]'); if (task) { var blk = DOC.filter(function (x) { return x.id === task.closest('[data-block]').getAttribute('data-block'); })[0]; var it = blk.items[+task.getAttribute('data-task')]; it.done = !it.done; it.raw = it.raw.replace(/\[[ x]\]/, it.done ? '[x]' : '[ ]'); renderDoc(); return; }
     var td = e.target.closest('td[data-r]'); if (td) { state.cell = { r: +td.getAttribute('data-r'), c: +td.getAttribute('data-c') }; renderDoc(); renderToolbar(); var s = $('#doc td.sel'); if (s) { s.focus(); } return; }
     var block = e.target.closest('[data-block]');
-    if (block && state.mode === 'unified' && !window.getSelection().toString()) { var id = block.getAttribute('data-block'); if (id !== state.activeId) { state.activeId = id; state.cell = null; renderDoc(); } }
+    if (block && state.mode === 'unified' && !window.getSelection().toString()) { var id = block.getAttribute('data-block'); if (id !== state.activeId) { state.activeId = id; state.cell = null; renderDocAnimated(); } }
   });
   $('#doc').addEventListener('mouseup', onSelect);
 
@@ -879,8 +905,14 @@
 
   // floating toolbar reveal
   var editor = $('#editor');
+  document.addEventListener('mousemove', function (e) { lastPt.x = e.clientX; lastPt.y = e.clientY; }, { passive: true });
   editor.addEventListener('mouseenter', function () { state.hover = true; updateTbActive(); });
-  editor.addEventListener('mouseleave', function () { state.hover = false; updateTbActive(); });
+  editor.addEventListener('mouseleave', function (e) {
+    var rt = e.relatedTarget;
+    // don't collapse the toolbar when the pointer moves onto a popup floating over the editor
+    if ((rt && rt.closest && (rt.closest('#foldmenu') || rt.closest('#selpop') || rt.closest('#composer'))) || anyPopupOpen()) return;
+    state.hover = false; updateTbActive();
+  });
   document.addEventListener('pointerdown', function (e) {
     state.focus = !!e.target.closest('#editor');
     updateTbActive();
