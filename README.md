@@ -37,6 +37,12 @@ The result is designed to win where it matters: **keystroke-to-paint latency on 
 - 🔒 **Electron-safe by design.** MDX/Mermaid execute in an opaque-origin sandboxed iframe — the XSS→RCE path is closed.
 - 🎛 **Drop-in and highly configurable.** One React component, a headless core (`typewright/core`), and a streaming module (`typewright/streaming`).
 
+## Demo
+
+An interactive, self-contained prototype of the full featureset lives in [`demo/index.html`](./demo/index.html) — open it in a browser (no build). It represents the unified live-preview editing, the fold menu, in-place tables, the floating formatting toolbar, inline comments + presence, mode switching, theming, and the streaming-anticipation preview. The macOS-style app icon and its showcase are in [`assets/`](./assets/) ([`icon.svg`](./assets/icon.svg) · [`icon.html`](./assets/icon.html)).
+
+> The prototype simulates the interactions to communicate design intent; the real engine (per [SPEC.md](./SPEC.md)) is being built underneath the same API.
+
 ## Install
 
 ```sh
