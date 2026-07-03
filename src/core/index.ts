@@ -16,6 +16,17 @@ import type {
 
 export * from '../types';
 
+/* Headless engine surface — parser, renderer, unified-mode, folding, doc model. */
+export { parse } from './parser';
+export { renderToHtml, renderInline, renderNode, safeUrl } from './render';
+export { collectMarkers, hiddenMarkers, activeBlockIndex } from './unified';
+export type { Marker } from './unified';
+export { headingFoldRanges } from './fold';
+export type { FoldRange } from './fold';
+export { TextDoc } from './text';
+export type { Change, LineInfo, Position } from './text';
+export * from './ast';
+
 export interface EditorViewOptions extends EditorConfig, EditorEvents {
   /** Element the editor mounts into. */
   parent: HTMLElement;
