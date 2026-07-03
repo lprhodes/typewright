@@ -1,0 +1,97 @@
+{
+  "name": "typewright",
+  "version": "0.0.0",
+  "description": "A blazing-fast, from-scratch GitHub Flavored Markdown + MDX editor and streaming previewer for the web. Zero-runtime-dependency engine, Obsidian-style unified live preview, semantic folding, in-place tables, and LLM token-stream rendering that anticipates formatting as it arrives.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Luke Rhodes (@lprhodes)",
+  "homepage": "https://github.com/lprhodes/typewright#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lprhodes/typewright.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lprhodes/typewright/issues"
+  },
+  "keywords": [
+    "markdown",
+    "mdx",
+    "editor",
+    "gfm",
+    "github-flavored-markdown",
+    "wysiwyg",
+    "live-preview",
+    "streaming",
+    "llm",
+    "ai",
+    "react",
+    "code-editor",
+    "obsidian",
+    "mermaid",
+    "syntax-highlighting"
+  ],
+  "sideEffects": [
+    "*.css"
+  ],
+  "files": [
+    "dist",
+    "SPEC.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/react/index.cjs",
+  "module": "./dist/react/index.js",
+  "types": "./dist/react/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.js",
+      "require": "./dist/react/index.cjs"
+    },
+    "./core": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js",
+      "require": "./dist/core/index.cjs"
+    },
+    "./streaming": {
+      "types": "./dist/streaming/index.d.ts",
+      "import": "./dist/streaming/index.js",
+      "require": "./dist/streaming/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "echo \"(no tests yet — see SPEC.md roadmap)\" && exit 0",
+    "prepublishOnly": "pnpm run build"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "packageManager": "pnpm@10.14.0",
+  "publishConfig": {
+    "access": "public"
+  }
+}
