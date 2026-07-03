@@ -16,6 +16,9 @@ export type {
   AnticipationOptions,
 } from '../types';
 
+export { anticipate } from './anticipate';
+export type { AnticipateResult } from './anticipate';
+
 /**
  * Create a controller that accumulates an incoming token stream and emits the
  * running text on every update.
