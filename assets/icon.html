@@ -1,0 +1,119 @@
+<!-- Typewright icon showcase — presentation of assets/icon.svg at marketing fidelity. -->
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Typewright — app icon</title>
+<style>
+  :root {
+    --ui: -apple-system, "SF Pro Text", BlinkMacSystemFont, system-ui, sans-serif;
+    --disp: -apple-system, "SF Pro Display", system-ui, sans-serif;
+    --mono: "SF Mono", ui-monospace, Menlo, monospace;
+    --bg: #0c0e11; --panel: #14171b; --line: rgba(255,255,255,.09); --text: #e8eaed; --text-2: #9aa1a8;
+    --radius: 22.37%; /* macOS icon corner ratio */
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: var(--ui); background: radial-gradient(1000px 500px at 70% -10%, #171b20, #0c0e11 60%); color: var(--text); -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 64px 24px 100px; }
+  h1 { font-family: var(--disp); font-size: 40px; letter-spacing: -0.03em; margin: 0 0 6px; font-weight: 680; }
+  .lede { color: var(--text-2); font-size: 16px; max-width: 60ch; margin: 0 0 44px; }
+  .hero-icon { width: 300px; height: 300px; margin: 6px 0 8px; filter: drop-shadow(0 40px 60px rgba(0,0,0,.55)); }
+  .hero-icon svg { width: 100%; height: 100%; }
+  .cap { font-family: var(--mono); font-size: 12px; color: var(--text-2); }
+
+  section { margin-top: 56px; }
+  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-2); font-weight: 600; margin: 0 0 18px; }
+
+  .sizes { display: flex; align-items: flex-end; gap: 28px; flex-wrap: wrap; }
+  .size { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .size .ic { filter: drop-shadow(0 12px 22px rgba(0,0,0,.4)); }
+  .size .ic svg { display: block; width: 100%; height: 100%; }
+  .size small { font-family: var(--mono); font-size: 11px; color: var(--text-2); }
+
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 640px) { .split { grid-template-columns: 1fr; } }
+  .swatch { border: 1px solid var(--line); border-radius: 18px; padding: 40px; display: grid; place-items: center; gap: 14px; }
+  .swatch.dark { background: #08090b; }
+  .swatch.light { background: #eef0f3; }
+  .swatch .lab { font-size: 12px; color: var(--text-2); font-family: var(--mono); }
+  .swatch.light .lab { color: #5a6169; }
+  .swatch .ic { width: 168px; height: 168px; filter: drop-shadow(0 18px 30px rgba(0,0,0,.35)); }
+  .swatch .ic svg { width: 100%; height: 100%; }
+
+  /* dock mockup */
+  .dock { display: flex; justify-content: center; }
+  .dock-bar { display: inline-flex; align-items: flex-end; gap: 14px; padding: 12px 18px; border-radius: 26px; background: rgba(255,255,255,.10); border: 1px solid rgba(255,255,255,.16); backdrop-filter: blur(24px) saturate(1.6); box-shadow: 0 30px 60px -12px rgba(0,0,0,.6); }
+  .dock-bar .app { width: 64px; height: 64px; border-radius: 15px; box-shadow: 0 8px 16px rgba(0,0,0,.3); }
+  .dock-bar .app.a { background: linear-gradient(160deg,#3a3f47,#22262c); }
+  .dock-bar .app.b { background: linear-gradient(160deg,#ff7a7a,#e0483d); }
+  .dock-bar .app.c { background: linear-gradient(160deg,#59d38b,#1f9d63); }
+  .dock-bar .tw { width: 72px; height: 72px; }
+  .dock-bar .tw svg { width: 100%; height: 100%; filter: drop-shadow(0 10px 16px rgba(0,0,0,.4)); }
+  .dock-bar .dot { width: 4px; height: 4px; border-radius: 50%; background: rgba(255,255,255,.6); margin: 0 auto; }
+
+  .note { margin-top: 56px; font-size: 13.5px; color: var(--text-2); border-top: 1px solid var(--line); padding-top: 20px; line-height: 1.6; }
+  .note code { font-family: var(--mono); background: #1c2026; padding: 1px 6px; border-radius: 5px; color: var(--text); }
+  a { color: #7fb2ff; }
+</style>
+
+<!-- icon symbol -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><symbol id="tw-icon" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="s-tile" x1="150" y1="110" x2="900" y2="950" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#7fb2ff"/><stop offset="0.52" stop-color="#6d74ff"/><stop offset="1" stop-color="#9a63ef"/></linearGradient>
+    <linearGradient id="s-gloss" x1="0" y1="80" x2="0" y2="540" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fff" stop-opacity=".20"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+    <linearGradient id="s-floor" x1="0" y1="600" x2="0" y2="944" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#25165f" stop-opacity="0"/><stop offset="1" stop-color="#25165f" stop-opacity=".18"/></linearGradient>
+    <linearGradient id="s-glyph" x1="512" y1="340" x2="512" y2="730" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#e9f0ff"/></linearGradient>
+    <linearGradient id="s-caret" x1="0" y1="460" x2="0" y2="720" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#eaf3ff"/><stop offset="1" stop-color="#bcd6ff"/></linearGradient>
+    <clipPath id="s-clip"><rect x="80" y="80" width="864" height="864" rx="193"/></clipPath>
+    <filter id="s-shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="9" stdDev="15" flood-color="#0b0740" flood-opacity=".30"/></filter>
+  </defs>
+  <rect x="80" y="80" width="864" height="864" rx="193" fill="url(#s-tile)"/>
+  <g clip-path="url(#s-clip)">
+    <rect x="80" y="80" width="864" height="864" fill="url(#s-gloss)"/>
+    <rect x="80" y="80" width="864" height="864" fill="url(#s-floor)"/>
+    <g stroke="#fff" stroke-opacity=".10" stroke-width="14" stroke-linecap="round"><line x1="300" y1="628" x2="724" y2="628"/><line x1="300" y1="690" x2="600" y2="690"/></g>
+  </g>
+  <rect x="83" y="83" width="858" height="858" rx="190" fill="none" stroke="#fff" stroke-opacity=".22" stroke-width="2.5"/>
+  <g filter="url(#s-shadow)"><rect x="290" y="352" width="444" height="96" rx="30" fill="url(#s-glyph)"/><rect x="460" y="352" width="104" height="372" rx="30" fill="url(#s-glyph)"/></g>
+  <g fill="url(#s-caret)"><rect x="606" y="470" width="26" height="244" rx="13"/><rect x="586" y="470" width="66" height="16" rx="8"/><rect x="586" y="698" width="66" height="16" rx="8"/></g>
+</symbol></svg>
+
+<div class="wrap">
+  <h1>Typewright icon</h1>
+  <p class="lede">A macOS-style app icon: a rounded-square tile with the indigo→violet Typewright gradient, the wordmark “T” lit from above, and a text caret — the editor’s signature — beside it. The single source asset is <code>assets/icon.svg</code>.</p>
+
+  <div class="hero-icon"><svg><use href="#tw-icon"/></svg></div>
+  <div class="cap">assets/icon.svg · 1024×1024</div>
+
+  <section>
+    <h2>Sizes</h2>
+    <div class="sizes">
+      <div class="size"><div class="ic" style="width:128px;height:128px"><svg><use href="#tw-icon"/></svg></div><small>128</small></div>
+      <div class="size"><div class="ic" style="width:96px;height:96px"><svg><use href="#tw-icon"/></svg></div><small>96</small></div>
+      <div class="size"><div class="ic" style="width:64px;height:64px"><svg><use href="#tw-icon"/></svg></div><small>64</small></div>
+      <div class="size"><div class="ic" style="width:48px;height:48px"><svg><use href="#tw-icon"/></svg></div><small>48</small></div>
+      <div class="size"><div class="ic" style="width:32px;height:32px"><svg><use href="#tw-icon"/></svg></div><small>32</small></div>
+      <div class="size"><div class="ic" style="width:16px;height:16px"><svg><use href="#tw-icon"/></svg></div><small>16</small></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>On light &amp; dark</h2>
+    <div class="split">
+      <div class="swatch dark"><div class="ic"><svg><use href="#tw-icon"/></svg></div><span class="lab">dark surface</span></div>
+      <div class="swatch light"><div class="ic"><svg><use href="#tw-icon"/></svg></div><span class="lab">light surface</span></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>In the dock</h2>
+    <div class="dock">
+      <div class="dock-bar">
+        <div class="app a"></div>
+        <div class="app b"></div>
+        <div class="tw"><svg><use href="#tw-icon"/></svg><div class="dot"></div></div>
+        <div class="app c"></div>
+      </div>
+    </div>
+  </section>
+
+  <p class="note">Vector, so it scales cleanly to any raster size for <code>.icns</code> / <code>favicon</code> / PNG export (e.g. <code>1024, 512, 256, 128, 64, 32, 16</code>). Corner radius follows the macOS ~22.4% ratio. The mark reads at 16px (the caret merges into a clean “T” silhouette at the smallest size). <a href="../demo/index.html">← back to the demo</a></p>
+</div>
