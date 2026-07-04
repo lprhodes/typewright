@@ -166,6 +166,11 @@ export interface EditorConfig {
   placeholder?: string;
   keymap?: KeymapOptions;
   theme?: ThemeOptions;
+  /**
+   * Show the built-in formatting toolbar (edit/unified modes). `true`/`"docked"`
+   * pins it; `"floating"` reveals it on hover/focus.
+   */
+  toolbar?: boolean | 'docked' | 'floating';
   /** Lines rendered outside the viewport bounds (virtualization overscan). */
   overscan?: number;
 }

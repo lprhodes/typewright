@@ -23,6 +23,8 @@ export { collectMarkers, hiddenMarkers, activeBlockIndex } from './unified';
 export type { Marker } from './unified';
 export { headingFoldRanges } from './fold';
 export type { FoldRange } from './fold';
+export { applyCommand } from './commands';
+export type { Command, Sel, CommandResult } from './commands';
 export { TextDoc } from './text';
 export type { Change, LineInfo, Position } from './text';
 export * from './ast';

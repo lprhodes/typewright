@@ -29,7 +29,7 @@ const x: number = 1;
 Content under the second heading.
 `;
 
-const STREAM = ['# Q3 ', 'Plan\n\n', 'The rollout is **bo', 'ld** and ', 'phased.\n\n', '```ts\n', 'const p = 1;\n', '```\n\n', 'Ship it.'];
+const STREAM = ['# Q3 ', 'Launch\n\n', 'The rollout is **bo', 'ld** and *phas', 'ed*.\n\n', '- Ship\n', '- Measure\n', '- Iterate\n\n', '```ts\n', 'const plan = phases.map(run)\n', '```\n\n', '> Ship it.'];
 const MODES: EditorMode[] = ['edit', 'unified', 'preview', 'read'];
 const PEOPLE: Record<string, string> = { You: '#6ea3ff', 'Priya N.': '#e0b24d', 'Sam K.': '#58c295', 'Ana R.': '#c98bff' };
 const initials = (n: string): string => n.split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
@@ -74,7 +74,7 @@ function App(): React.ReactElement {
   const [mode, setMode] = React.useState<EditorMode>('unified');
   const [theme, setTheme] = React.useState<'dark' | 'light'>('dark');
   const [tab, setTab] = React.useState<'setup' | 'comments'>('setup');
-  const [toolbarMode, setToolbarMode] = React.useState<'floating' | 'docked'>('docked');
+  const [toolbarMode, setToolbarMode] = React.useState<'floating' | 'docked'>('floating');
   const [exts, setExts] = React.useState({ gfm: true, folding: true, mdx: true, mermaid: true, math: true });
   const [comments, setComments] = React.useState<Thread[]>(SEED_COMMENTS);
   const [toast, setToast] = React.useState<string | null>(null);
@@ -150,15 +150,8 @@ function App(): React.ReactElement {
           </div>
           <div className="layout">
             <div className="editor-col">
-              <div className={`toolbar${toolbarMode === 'floating' ? ' floatmode' : ''}`}>
-                {TOOL('Bold', 'B', 'b')}{TOOL('Italic', 'I', 'i')}{TOOL('Strikethrough', 'S', 's')}{TOOL('Code', TI.code)}{TOOL('Link', TI.link)}
-                <span className="tsep" />
-                {TOOL('Heading', 'H')}{TOOL('Bullet list', TI.ul)}{TOOL('Numbered list', TI.ol)}{TOOL('Quote', TI.quote)}{TOOL('Divider', TI.hr)}
-                <span className="tsep" />
-                {TOOL('Table', TI.table)}{TOOL('Code block', TI.cb)}
-              </div>
               <div data-testid="editor" style={{ maxHeight: 480, overflow: 'auto' }}>
-                <TypewrightEditor value={md} onChange={setMd} mode={mode} folding={exts.folding} theme={{ appearance: theme }} />
+                <TypewrightEditor value={md} onChange={setMd} mode={mode} folding={exts.folding} toolbar={toolbarMode} theme={{ appearance: theme }} />
               </div>
             </div>
 
