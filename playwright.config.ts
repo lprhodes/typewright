@@ -6,7 +6,7 @@ export default defineConfig({
   fullyParallel: true,
   use: { baseURL: 'http://localhost:5178', trace: 'off' },
   webServer: {
-    command: 'pnpm playground',
+    command: 'pnpm demo',
     url: 'http://localhost:5178',
     reuseExistingServer: true,
     timeout: 60_000,
