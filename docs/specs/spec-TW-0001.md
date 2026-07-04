@@ -156,5 +156,24 @@ rendering, the in-place table WYSIWYG grid (C7 renders tables read-only), and
 the comments/collaboration + presence backend (C20–C23). These are the honest
 next phases; the API surface already reserves their options.
 
-**Status:** Done (v0.1.0 core slice). Follow-on phases tracked in
-[plan-TW-0001.md](../plans/plan-TW-0001.md) §15.
+**v0.1.x — follow-on features shipped to `main`:**
+- The **demo now dogfoods the real library** (was a mockup) and is the e2e
+  target; the full design vision is preserved as `demo/design-prototype.html`,
+  and a self-contained `demo/standalone.html` opens over `file://`.
+- **Formatting toolbar (C17–C19) — built into the library.** A pure, tested
+  command engine (`core/commands.ts`: bold/italic/strike/code/link/headings/
+  lists/task/quote/hr/codeblock/table), an imperative `applyCommand` handle on
+  `<TypewrightEditor>`, and a built-in `<Toolbar>` (`toolbar: true|'docked'|
+  'floating'`; floating animates in on hover/focus).
+- **Editable preview (C4)** — `preview` mode now edits (click a block); only
+  `read` is static. **Unified reveal/commit FLIP-animates** rows (no jump).
+  **Streaming** reconciles block-by-block with entrance animations + shimmer.
+
+**Still deferred (next roadmap features, SPEC.md §15):** comments &
+collaboration + presence (C20–C23) and a built-in settings surface; plus
+character-level inline reveal, custom virtualization/IME, MDX JSX execution,
+Mermaid/math rendering, in-place table WYSIWYG grid, and syntax **colouring**
+of rendered code blocks.
+
+**Status:** In progress — v0.1 core + toolbar shipped; comments/settings next.
+Follow-on phases tracked in [plan-TW-0001.md](../plans/plan-TW-0001.md) §15.
