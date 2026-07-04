@@ -3,7 +3,7 @@
  */
 
 export { TypewrightEditor, useInjectStyles } from './TypewrightEditor';
-export type { TypewrightEditorProps } from './TypewrightEditor';
+export type { TypewrightEditorProps, TypewrightEditorHandle } from './TypewrightEditor';
 export { StreamingPreview } from './StreamingPreview';
 export type { StreamingPreviewProps } from './StreamingPreview';
 

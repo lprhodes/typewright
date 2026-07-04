@@ -100,6 +100,26 @@ test('unified: editing a block that adds a split does not corrupt other blocks',
   expect(val).toMatch(/NEW[\s\S]*para1[\s\S]*para2/); // order preserved
 });
 
+test('toolbar bold command wraps the selection', async ({ page }) => {
+  await page.locator('button[data-mode="edit"]').click();
+  const editor = page.getByTestId('editor');
+  const ta = editor.locator('textarea');
+  await ta.click();
+  await ta.fill('word');
+  await ta.selectText();
+  await editor.locator('.tw-tb-btn[data-cmd="bold"]').click();
+  await expect(ta).toHaveValue('**word**');
+});
+
+test('preview mode is editable (click a block to edit its source)', async ({ page }) => {
+  await page.locator('button[data-mode="preview"]').click();
+  const editor = page.getByTestId('editor');
+  await expect(editor.locator('h1')).toContainText('Typewright');
+  await editor.locator('.tw-block', { hasText: 'from-scratch' }).first().click();
+  await expect(editor.locator('textarea.tw-source')).toBeVisible();
+  await expect(editor.locator('textarea.tw-source')).toHaveValue(/\*\*from-scratch\*\*/);
+});
+
 test('streaming anticipates then resolves', async ({ page }) => {
   await page.getByTestId('play-stream').click();
   const stream = page.getByTestId('stream');

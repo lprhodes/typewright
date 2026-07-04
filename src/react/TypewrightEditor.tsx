@@ -1,6 +1,18 @@
 import * as React from 'react';
-import { parse, renderNode, renderToHtml } from '../core';
+import { applyCommand, parse, renderNode, renderToHtml } from '../core';
+import type { Command } from '../core';
 import type { DocChange, EditorConfig, EditorEvents } from '../types';
+
+/** Imperative handle exposed via a ref on `<TypewrightEditor>`. */
+export interface TypewrightEditorHandle {
+  /** Apply a formatting command to the currently-focused editing surface. */
+  applyCommand: (command: Command) => void;
+}
+
+/** Registration of the currently-focused source textarea (for toolbar commands). */
+interface ActiveSource {
+  apply: (command: Command) => void;
+}
 
 /**
  * Typewright — drop-in Markdown + MDX editor React component.
@@ -71,83 +83,159 @@ function handleShortcut(
   }
 }
 
-export function TypewrightEditor(props: TypewrightEditorProps): React.ReactElement {
-  useInjectStyles();
-  const {
-    value,
-    defaultValue,
-    onChange,
-    onSelectionChange,
-    mode = 'unified',
-    folding,
-    readOnly = false,
-    placeholder = 'Write Markdown…',
-    theme,
-    className,
-    style,
-  } = props;
+export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, TypewrightEditorProps>(
+  function TypewrightEditor(props, forwardedRef): React.ReactElement {
+    useInjectStyles();
+    const {
+      value,
+      defaultValue,
+      onChange,
+      onSelectionChange,
+      mode = 'unified',
+      folding,
+      readOnly = false,
+      placeholder = 'Write Markdown…',
+      theme,
+      toolbar,
+      className,
+      style,
+    } = props;
 
-  const isControlled = value !== undefined;
-  const [internal, setInternal] = React.useState<string>(defaultValue ?? '');
-  const md = isControlled ? value ?? '' : internal;
+    const isControlled = value !== undefined;
+    const [internal, setInternal] = React.useState<string>(defaultValue ?? '');
+    const md = isControlled ? value ?? '' : internal;
 
-  const mdRef = React.useRef(md);
-  mdRef.current = md;
+    const mdRef = React.useRef(md);
+    mdRef.current = md;
 
-  const commitValue = React.useCallback(
-    (next: string, change: DocChange) => {
-      if (!isControlled) setInternal(next);
-      onChange?.(next, change);
-    },
-    [isControlled, onChange],
-  );
-
-  const foldable = folding === undefined ? true : folding !== false;
-  const appearance = theme?.appearance ?? 'auto';
-  const rootClass = ['tw-editor', `tw-mode-${mode}`, appearance !== 'auto' ? `tw-theme-${appearance}` : '', className]
-    .filter(Boolean)
-    .join(' ');
-
-  if (mode === 'edit') {
-    return (
-      <div className={rootClass} style={style} data-typewright="edit">
-        <SourceArea
-          value={md}
-          readOnly={readOnly}
-          placeholder={placeholder}
-          onChange={(next, change) => commitValue(next, change)}
-          onSelect={onSelectionChange}
-          full
-        />
-      </div>
+    const commitValue = React.useCallback(
+      (next: string, change: DocChange) => {
+        if (!isControlled) setInternal(next);
+        onChange?.(next, change);
+      },
+      [isControlled, onChange],
     );
-  }
 
-  if (mode === 'preview' || mode === 'read') {
-    const html = renderToHtml(parse(md));
+    // The focused source textarea registers itself so toolbar commands + the
+    // imperative handle can act on the live selection.
+    const activeSource = React.useRef<ActiveSource | null>(null);
+    const register = React.useCallback((api: ActiveSource | null) => {
+      if (api || activeSource.current) activeSource.current = api;
+    }, []);
+    const applyCmd = React.useCallback((cmd: Command) => {
+      activeSource.current?.apply(cmd);
+    }, []);
+    React.useImperativeHandle(forwardedRef, () => ({ applyCommand: applyCmd }), [applyCmd]);
+
+    const foldable = folding === undefined ? true : folding !== false;
+    const appearance = theme?.appearance ?? 'auto';
+    const rootClass = ['tw-editor', `tw-mode-${mode}`, appearance !== 'auto' ? `tw-theme-${appearance}` : '', className]
+      .filter(Boolean)
+      .join(' ');
+
+    const toolbarMode: 'docked' | 'floating' = toolbar === 'floating' ? 'floating' : 'docked';
+    const showToolbar = !!toolbar && !readOnly && (mode === 'edit' || mode === 'unified');
+    const toolbarEl = showToolbar ? <Toolbar mode={toolbarMode} onCommand={applyCmd} /> : null;
+
+    if (mode === 'edit') {
+      return (
+        <div className={rootClass} style={style} data-typewright="edit">
+          {toolbarEl}
+          <SourceArea
+            value={md}
+            readOnly={readOnly}
+            placeholder={placeholder}
+            onChange={(next, change) => commitValue(next, change)}
+            onSelect={onSelectionChange}
+            register={register}
+            full
+          />
+        </div>
+      );
+    }
+
+    if (mode === 'read') {
+      const html = renderToHtml(parse(md));
+      return (
+        <div
+          className={rootClass}
+          style={style}
+          data-typewright="read"
+          // sanitized by render.ts
+          dangerouslySetInnerHTML={{ __html: html || `<p class="tw-placeholder">${escapeText(placeholder)}</p>` }}
+        />
+      );
+    }
+
+    // unified + preview: editable block-level rich preview
     return (
-      <div
-        className={rootClass}
+      <UnifiedEditor
+        md={md}
+        mdRef={mdRef}
+        rootClass={rootClass}
         style={style}
-        data-typewright={mode}
-        // sanitized by render.ts
-        dangerouslySetInnerHTML={{ __html: html || `<p class="tw-placeholder">${escapeText(placeholder)}</p>` }}
+        readOnly={readOnly}
+        placeholder={placeholder}
+        foldable={foldable}
+        commitValue={commitValue}
+        register={register}
+        toolbar={toolbarEl}
       />
     );
-  }
+  },
+);
 
-  // unified
+/* ------------------------------------------------------------------ *
+ * Formatting toolbar
+ * ------------------------------------------------------------------ */
+
+const TB_GROUPS: { cmd: Command; label: string; text: string; cls?: string }[][] = [
+  [
+    { cmd: 'bold', label: 'Bold  ⌘B', text: 'B', cls: 'b' },
+    { cmd: 'italic', label: 'Italic  ⌘I', text: 'I', cls: 'i' },
+    { cmd: 'strikethrough', label: 'Strikethrough', text: 'S', cls: 's' },
+    { cmd: 'inlineCode', label: 'Inline code  ⌘E', text: '‹›' },
+    { cmd: 'link', label: 'Link  ⌘K', text: '↗' },
+  ],
+  [
+    { cmd: 'heading1', label: 'Heading 1', text: 'H1' },
+    { cmd: 'heading2', label: 'Heading 2', text: 'H2' },
+    { cmd: 'bulletList', label: 'Bullet list', text: '•' },
+    { cmd: 'orderedList', label: 'Numbered list', text: '1.' },
+    { cmd: 'taskList', label: 'Task list', text: '☑' },
+    { cmd: 'quote', label: 'Blockquote', text: '❝' },
+  ],
+  [
+    { cmd: 'horizontalRule', label: 'Divider', text: '―' },
+    { cmd: 'codeBlock', label: 'Code block', text: '{ }' },
+    { cmd: 'table', label: 'Table', text: '▦' },
+  ],
+];
+
+function Toolbar({ mode, onCommand }: { mode: 'docked' | 'floating'; onCommand: (cmd: Command) => void }): React.ReactElement {
   return (
-    <UnifiedEditor
-      md={md}
-      mdRef={mdRef}
-      rootClass={rootClass}
-      style={style}
-      readOnly={readOnly}
-      placeholder={placeholder}
-      foldable={foldable}
-      commitValue={commitValue}
-    />
+    <div className={`tw-toolbar tw-toolbar-${mode}`} role="toolbar" aria-label="Formatting">
+      {TB_GROUPS.map((group, gi) => (
+        <React.Fragment key={gi}>
+          {gi > 0 && <span className="tw-tb-sep" aria-hidden="true" />}
+          {group.map((it) => (
+            <button
+              key={it.cmd}
+              type="button"
+              className={`tw-tb-btn${it.cls ? ' tw-tb-' + it.cls : ''}`}
+              title={it.label}
+              aria-label={it.label}
+              data-cmd={it.cmd}
+              // keep the editor's selection: don't let the button steal focus
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => onCommand(it.cmd)}
+            >
+              {it.text}
+            </button>
+          ))}
+        </React.Fragment>
+      ))}
+    </div>
   );
 }
 
@@ -164,10 +252,12 @@ interface UnifiedProps {
   placeholder: string;
   foldable: boolean;
   commitValue: (next: string, change: DocChange) => void;
+  register?: (api: ActiveSource | null) => void;
+  toolbar?: React.ReactNode;
 }
 
 function UnifiedEditor(props: UnifiedProps): React.ReactElement {
-  const { md, mdRef, rootClass, style, readOnly, placeholder, foldable, commitValue } = props;
+  const { md, mdRef, rootClass, style, readOnly, placeholder, foldable, commitValue, register, toolbar } = props;
   const [active, setActive] = React.useState<number | null>(null);
   const [draft, setDraft] = React.useState('');
   const [folds, setFolds] = React.useState<Set<number>>(() => new Set());
@@ -177,6 +267,34 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
   const draftRef = React.useRef('');
   activeRef.current = active;
   draftRef.current = draft;
+
+  // FLIP: rows slide to their new position when a line's height changes on
+  // reveal/commit, instead of jumping.
+  const rowEls = React.useRef<Map<number, HTMLElement>>(new Map());
+  const flipFrom = React.useRef<Map<number, number> | null>(null);
+  const captureFlip = React.useCallback(() => {
+    const m = new Map<number, number>();
+    rowEls.current.forEach((el, k) => m.set(k, el.getBoundingClientRect().top));
+    flipFrom.current = m;
+  }, []);
+  React.useLayoutEffect(() => {
+    const from = flipFrom.current;
+    if (!from) return;
+    flipFrom.current = null;
+    rowEls.current.forEach((el, k) => {
+      const prev = from.get(k);
+      if (prev == null) return;
+      const dy = prev - el.getBoundingClientRect().top;
+      if (Math.abs(dy) > 0.5) {
+        el.style.transition = 'none';
+        el.style.transform = `translateY(${dy}px)`;
+        requestAnimationFrame(() => {
+          el.style.transition = 'transform .3s cubic-bezier(.32,.72,0,1)';
+          el.style.transform = '';
+        });
+      }
+    });
+  });
 
   const doc = React.useMemo(() => parse(md), [md]);
   const blocks = doc.children;
@@ -202,6 +320,7 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
   const activate = React.useCallback(
     (clickedFrom: number) => {
       if (readOnly) return;
+      captureFlip();
       const { next, change } = commit();
       let mapped = clickedFrom;
       if (change && clickedFrom >= change.to) {
@@ -219,7 +338,7 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
         setActive(idx);
       }
     },
-    [commit, readOnly],
+    [commit, readOnly, captureFlip],
   );
 
   // which block indices are hidden by a folded ancestor heading
@@ -251,10 +370,12 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
   if (!md.trim() || typing) {
     return (
       <div className={rootClass} style={style} data-typewright="unified">
+        {toolbar}
         <SourceArea
           value={md}
           full
           placeholder={placeholder}
+          register={register}
           onFocus={() => setTyping(true)}
           onBlur={() => setTyping(false)}
           onChange={(next, change) => commitValue(next, change)}
@@ -265,12 +386,21 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
 
   return (
     <div className={rootClass} style={style} data-typewright="unified">
+      {toolbar}
       {blocks.map((b, i) => {
         if (hidden.has(i)) return null;
         const isHeading = b.type === 'heading';
         const folded = isHeading && folds.has(i);
         return (
-          <div className="tw-row" key={`${i}-${b.from}`} data-block-type={b.type}>
+          <div
+            className="tw-row"
+            key={`${i}-${b.from}`}
+            data-block-type={b.type}
+            ref={(el) => {
+              if (el) rowEls.current.set(i, el);
+              else rowEls.current.delete(i);
+            }}
+          >
             {foldable && isHeading && !readOnly && (
               <button
                 type="button"
@@ -293,9 +423,10 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
               <SourceArea
                 value={draft}
                 autoFocus
+                register={register}
                 onChange={(next) => setDraft(next)}
-                onBlur={commit}
-                onEscape={commit}
+                onBlur={() => { captureFlip(); commit(); }}
+                onEscape={() => { captureFlip(); commit(); }}
               />
             ) : (
               <div
@@ -357,12 +488,25 @@ interface SourceAreaProps {
   readOnly?: boolean;
   placeholder?: string;
   full?: boolean;
+  register?: (api: ActiveSource | null) => void;
 }
 
 function SourceArea(props: SourceAreaProps): React.ReactElement {
-  const { value, onChange, onBlur, onEscape, onFocus, onSelect, autoFocus, readOnly, placeholder, full } = props;
+  const { value, onChange, onBlur, onEscape, onFocus, onSelect, autoFocus, readOnly, placeholder, full, register } = props;
   const ref = React.useRef<HTMLTextAreaElement>(null);
   const pendingSel = React.useRef<[number, number] | null>(null);
+
+  const apply = React.useCallback(
+    (cmd: Command) => {
+      const el = ref.current;
+      if (!el) return;
+      const val = el.value;
+      const r = applyCommand(val, { from: el.selectionStart, to: el.selectionEnd }, cmd);
+      pendingSel.current = [r.selection.from, r.selection.to];
+      onChange(r.text, { from: 0, to: val.length, insert: r.text });
+    },
+    [onChange],
+  );
 
   React.useEffect(() => {
     if (pendingSel.current && ref.current) {
@@ -395,8 +539,12 @@ function SourceArea(props: SourceAreaProps): React.ReactElement {
       onFocus={(e) => {
         autoGrow(e.currentTarget);
         onFocus?.();
+        register?.({ apply });
       }}
-      onBlur={onBlur}
+      onBlur={() => {
+        register?.(null);
+        onBlur?.();
+      }}
       onSelect={(e) => {
         const el = e.currentTarget;
         onSelect?.({ main: { from: el.selectionStart, to: el.selectionEnd }, ranges: [{ from: el.selectionStart, to: el.selectionEnd }] });
@@ -446,9 +594,19 @@ const TYPEWRIGHT_CSS = `
 .tw-placeholder{color:var(--tw-faint)}
 .tw-mode-preview,.tw-mode-read,.tw-mode-unified{padding:14px 18px}
 .tw-mode-edit{padding:0}
+.tw-toolbar{display:flex; align-items:center; justify-content:center; gap:3px; flex-wrap:wrap; padding:5px 7px; margin-bottom:9px; border:1px solid var(--tw-line); border-radius:12px; background:color-mix(in srgb, var(--tw-bg) 80%, transparent); backdrop-filter:blur(18px) saturate(1.6); -webkit-backdrop-filter:blur(18px) saturate(1.6); position:sticky; top:0; z-index:5; box-shadow:0 4px 14px -8px rgba(0,0,0,.3), inset 0 1px 0 rgba(255,255,255,.06)}
+.tw-toolbar-floating{max-height:0; padding-top:0; padding-bottom:0; margin-bottom:0; opacity:0; overflow:hidden; border-color:transparent; box-shadow:none; transform:translateY(-7px); transition:max-height .28s cubic-bezier(.32,.72,0,1), opacity .2s, margin .28s cubic-bezier(.32,.72,0,1), padding .28s, transform .24s cubic-bezier(.32,.72,0,1)}
+.tw-editor:hover .tw-toolbar-floating,.tw-editor:focus-within .tw-toolbar-floating{max-height:84px; padding-top:5px; padding-bottom:5px; margin-bottom:9px; opacity:1; border-color:var(--tw-line); box-shadow:0 4px 14px -8px rgba(0,0,0,.3), inset 0 1px 0 rgba(255,255,255,.06); transform:none}
+.tw-tb-sep{width:1px; height:18px; background:var(--tw-line); margin:0 3px}
+.tw-tb-btn{min-width:28px; height:28px; padding:0 7px; border:1px solid transparent; background:transparent; border-radius:7px; color:var(--tw-muted); font-size:13px; line-height:1; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; transition:color .15s,background .15s}
+.tw-tb-btn:hover{color:var(--tw-fg); background:var(--tw-accent-soft)}
+.tw-tb-b{font-weight:800} .tw-tb-i{font-style:italic; font-family:Georgia,serif} .tw-tb-s{text-decoration:line-through}
+.tw-row{transition:transform .3s cubic-bezier(.32,.72,0,1)}
+@keyframes tw-stream-in{from{opacity:0; transform:translateY(7px)}to{opacity:1; transform:none}}
+.tw-streamblk.tw-stream-in{animation:tw-stream-in .3s cubic-bezier(.32,.72,0,1) both}
 .tw-row{position:relative; display:flex; align-items:flex-start; gap:2px}
 .tw-block{flex:1; min-width:0; border-radius:6px; cursor:text; padding:1px 4px; margin-left:-4px; transition:background .15s}
-.tw-mode-unified .tw-block:hover{background:var(--tw-accent-soft)}
+.tw-mode-unified .tw-block:hover,.tw-mode-preview .tw-block:hover{background:var(--tw-accent-soft)}
 .tw-block:focus-visible{outline:2px solid var(--tw-accent); outline-offset:2px}
 .tw-block>:first-child{margin-top:.15em} .tw-block>:last-child{margin-bottom:.15em}
 .tw-fold{flex:none; width:20px; height:24px; margin-top:.35em; border:0; background:none; color:var(--tw-faint); border-radius:5px; display:grid; place-items:center; cursor:pointer; opacity:.55; transition:opacity .15s,color .15s,transform .15s}
@@ -461,8 +619,9 @@ const TYPEWRIGHT_CSS = `
 @keyframes tw-blink{50%{opacity:0}}
 .tw-pending{opacity:.62; border-bottom:1.5px dashed var(--tw-accent); border-radius:1px}
 .tw-pending-strong{font-weight:680} .tw-pending-em{font-style:italic} .tw-pending-code{font-family:"SF Mono",ui-monospace,monospace}
-.tw-skeleton{border:1px solid var(--tw-line); border-radius:10px; padding:12px; margin:.6em 0; background:var(--tw-chip)}
+.tw-skeleton{border:1px solid var(--tw-line); border-radius:10px; padding:12px; margin:.6em 0; background:linear-gradient(100deg, var(--tw-chip) 30%, var(--tw-code-bg) 50%, var(--tw-chip) 70%); background-size:200% 100%; animation:tw-shimmer 1.3s infinite}
 .tw-skeleton-label{font-family:"SF Mono",ui-monospace,monospace; font-size:11px; color:var(--tw-accent)}
-.tw-skeleton-bar{height:8px; border-radius:4px; background:var(--tw-line); margin-top:9px}
-@media (prefers-reduced-motion: reduce){ .tw-caret{animation:none} }
+.tw-skeleton-bar{height:8px; border-radius:4px; background:var(--tw-line); margin-top:9px} .tw-skeleton-bar.two{width:70%} .tw-skeleton-bar.three{width:45%}
+@keyframes tw-shimmer{to{background-position:-200% 0}}
+@media (prefers-reduced-motion: reduce){ .tw-caret,.tw-skeleton,.tw-streamblk.tw-stream-in,.tw-row{animation:none !important; transition:none !important} }
 `;
