@@ -51,6 +51,8 @@ The result is designed to win where it matters: **keystroke-to-paint latency on 
 
 A live demo that **runs the real library** lives in [`demo/`](./demo/): `pnpm demo` (Vite) serves it at http://localhost:5178. It mounts the actual `<TypewrightEditor>` and `<StreamingPreview>` — the four modes, unified block-level editing, GFM rendering, folding, and streaming anticipation — and is the target of the Playwright e2e suite (`pnpm e2e`).
 
+To open the real demo **without a server**, run `pnpm demo:build` and open the self-contained, single-file [`demo/standalone.html`](./demo/standalone.html) directly (`file://`) — everything (React included) is inlined. (`demo/index.html` is the Vite source entry and needs the dev server; opening it raw shows instructions.)
+
 The full **design vision**, including designed-but-deferred surfaces (inline comments + presence, the floating formatting toolbar, in-place tables, Mermaid), is preserved as the self-contained [`demo/design-prototype.html`](./demo/design-prototype.html) — open it directly in a browser. The macOS-style app icon + showcase are in [`assets/`](./assets/) ([`icon.svg`](./assets/icon.svg) · [`icon.html`](./assets/icon.html)).
 
 ## Install
