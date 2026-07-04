@@ -49,9 +49,9 @@ The result is designed to win where it matters: **keystroke-to-paint latency on 
 
 ## Demo
 
-An interactive, self-contained prototype of the full featureset lives in [`demo/index.html`](./demo/index.html) — open it in a browser (no build). It represents the unified live-preview editing, the fold menu, in-place tables, the floating formatting toolbar, inline comments + presence, mode switching, theming, and the streaming-anticipation preview. The macOS-style app icon and its showcase are in [`assets/`](./assets/) ([`icon.svg`](./assets/icon.svg) · [`icon.html`](./assets/icon.html)).
+A live demo that **runs the real library** lives in [`demo/`](./demo/): `pnpm demo` (Vite) serves it at http://localhost:5178. It mounts the actual `<TypewrightEditor>` and `<StreamingPreview>` — the four modes, unified block-level editing, GFM rendering, folding, and streaming anticipation — and is the target of the Playwright e2e suite (`pnpm e2e`).
 
-> The prototype simulates the interactions to communicate design intent; the real engine (per [SPEC.md](./SPEC.md)) is being built underneath the same API.
+The full **design vision**, including designed-but-deferred surfaces (inline comments + presence, the floating formatting toolbar, in-place tables, Mermaid), is preserved as the self-contained [`demo/design-prototype.html`](./demo/design-prototype.html) — open it directly in a browser. The macOS-style app icon + showcase are in [`assets/`](./assets/) ([`icon.svg`](./assets/icon.svg) · [`icon.html`](./assets/icon.html)).
 
 ## Install
 
