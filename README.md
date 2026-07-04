@@ -114,7 +114,9 @@ const view = new EditorView({ parent: el, value: '# Doc', mode: 'unified' });
 
 ## Configuration
 
-`<TypewrightEditor>` accepts the full [`EditorConfig`](./src/types.ts) surface — `mode`, `extensions` (`gfm` / `mdx` / `mermaid` / `math` / `syntaxHighlight`), `folding`, `keymap`, `theme`, `readOnly`, `overscan`, and the `onChange` / `onSelectionChange` / `onModeChange` events. The complete, documented contract is `src/types.ts`; the behaviour behind each option is specified in [SPEC.md §9](./SPEC.md#9-public-api).
+`<TypewrightEditor>` accepts the full [`EditorConfig`](./src/types.ts) surface — `mode`, `toolbar`, `extensions` (`gfm` / `mdx` / `mermaid` / `math` / `syntaxHighlight`), `folding`, `keymap`, `theme`, `readOnly`, `overscan`, and the `onChange` / `onSelectionChange` / `onModeChange` events. The complete, documented contract is `src/types.ts`; the behaviour behind each option is specified in [SPEC.md §9](./SPEC.md#9-public-api).
+
+> 📚 **The complete feature catalogue + API reference — every capability with honest shipped/planned status — is [`docs/FEATURES.md`](./docs/FEATURES.md).**
 
 ## Package layout
 
