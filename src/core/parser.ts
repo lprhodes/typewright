@@ -23,8 +23,12 @@ import type {
   Blockquote,
   CellAlign,
   CodeBlock,
+  DefItem,
+  DefList,
   Document,
   Emphasis,
+  FootnoteDef,
+  FootnoteRef,
   Heading,
   HtmlBlock,
   Image,
@@ -34,7 +38,10 @@ import type {
   Link,
   List,
   ListItem,
+  Math,
+  MathBlock,
   Paragraph,
+  ParseOptions,
   Strikethrough,
   Strong,
   Table,
@@ -53,8 +60,28 @@ const MAX_TITLE = 1024;
 const MAX_ALT = 4096;
 const MAX_LANG = 256;
 const MAX_VALUE = 1_000_000;
+/** Footnote labels are short tokens; this caps the `[^…]` lookahead to O(1). */
+const MAX_FOOTNOTE_ID = 256;
 
 const cap = (s: string, n: number): string => (s.length > n ? s.slice(0, n) : s);
+
+/* ------------------------------------------------------------------ *
+ * Opt-in extensions (math / footnotes / definition lists)
+ *
+ * All three default to `false`, so `parse(src)` is byte-for-byte what it always
+ * was. The resolved flags live in module scope and are set once per `parse()`
+ * call; parsing is synchronous and non-reentrant across calls, and every nested
+ * `parseBlocks` within a single call shares the same flags — so this reads like
+ * a closure variable without threading an argument through every builder.
+ * ------------------------------------------------------------------ */
+
+interface ResolvedOptions {
+  math: boolean;
+  footnotes: boolean;
+  defLists: boolean;
+}
+
+let opts: ResolvedOptions = { math: false, footnotes: false, defLists: false };
 
 /* ------------------------------------------------------------------ *
  * Line model
@@ -165,17 +192,50 @@ function isTableStartAt(lines: Line[], j: number): boolean {
   return line.text.includes('|') && isDelimRow(next.text);
 }
 
+/* --- opt-in detectors (inert unless the matching flag is on) --- */
+
+/** A `$$` display-math fence on its own line (opener or closer). */
+const MATH_FENCE_RE = /^ {0,3}\$\$[ \t]*$/;
+const isMathOpen = (t: string): boolean => opts.math && MATH_FENCE_RE.test(t);
+
+/** A `[^id]:` footnote definition line. Never collides with `ITEM_RE`. */
+const FOOTNOTE_DEF_RE = /^( {0,3})\[\^([^\]\s]+)\]:/;
+const isFootnoteDef = (line: Line): boolean => opts.footnotes && FOOTNOTE_DEF_RE.test(line.text);
+
+/** A `: …` definition-list definition line (up to 3 leading spaces). */
+const DEF_RE = /^( {0,3}):[ \t]+/;
+
+/**
+ * Does line `j` open a definition list? Conservative: line `j` must be a plain
+ * term (a line that would otherwise be a paragraph — not another block) and the
+ * *immediately* following line must be a `: …` definition. The term guard reuses
+ * `startsBlock` (which never recurses into this check), so a heading/quote/table
+ * term is rejected.
+ */
+function isDefListStartAt(lines: Line[], j: number): boolean {
+  if (!opts.defLists) return false;
+  const line = lines[j];
+  const next = lines[j + 1];
+  if (!line || !next) return false;
+  if (isBlank(line)) return false;
+  if (startsBlock(lines, j)) return false; // term must not be another block
+  return DEF_RE.test(next.text);
+}
+
 /** Does line `j` begin a non-paragraph block (so a paragraph must stop)? */
 function startsBlock(lines: Line[], j: number): boolean {
-  const t = lines[j]!.text;
+  const line = lines[j]!;
+  const t = line.text;
   return (
     isFence(t) ||
     isAtx(t) ||
     isThematic(t) ||
     isQuote(t) ||
-    detectItem(lines[j]!) !== null ||
+    detectItem(line) !== null ||
     htmlVariant(t) !== null ||
-    isTableStartAt(lines, j)
+    isTableStartAt(lines, j) ||
+    isMathOpen(t) ||
+    isFootnoteDef(line)
   );
 }
 
@@ -188,7 +248,9 @@ function startsOtherBlock(line: Line): boolean {
     isThematic(t) ||
     isQuote(t) ||
     detectItem(line) !== null ||
-    htmlVariant(t) !== null
+    htmlVariant(t) !== null ||
+    isMathOpen(t) ||
+    isFootnoteDef(line)
   );
 }
 
@@ -255,6 +317,27 @@ function buildFence(lines: Line[], i: number): Built {
   );
   const to = closeTo ?? (inner.length ? inner[inner.length - 1]!.to : open.to);
   return { node: { type: 'codeBlock', from: open.from, to, lang, value, fenced: true }, next: j };
+}
+
+/** A `$$` … `$$` display-math block. Unterminated → runs to end (like a fence). */
+function buildMathBlock(lines: Line[], i: number): Built {
+  const open = lines[i]!;
+  const inner: Line[] = [];
+  let j = i + 1;
+  let closeTo: number | null = null;
+  while (j < lines.length) {
+    if (MATH_FENCE_RE.test(lines[j]!.text)) {
+      closeTo = lines[j]!.to;
+      j++;
+      break;
+    }
+    inner.push(lines[j]!);
+    j++;
+  }
+  const value = cap(inner.map((l) => l.text).join('\n'), MAX_VALUE);
+  const to = closeTo ?? (inner.length ? inner[inner.length - 1]!.to : open.to);
+  const node: MathBlock = { type: 'mathBlock', from: open.from, to, value };
+  return { node, next: j };
 }
 
 function buildIndentedCode(lines: Line[], i: number): Built {
@@ -491,6 +574,137 @@ function buildHtml(lines: Line[], i: number): Built {
   return { node: { type: 'htmlBlock', from, to, value, variant }, next: j };
 }
 
+/**
+ * A `[^id]: …` footnote definition. Its body — the text after `]: ` plus any
+ * indented / lazily-continued following lines — is parsed as nested blocks
+ * (mirroring `collectItem`'s continuation model), so a def can hold paragraphs,
+ * lists, code, etc.
+ */
+function buildFootnoteDef(lines: Line[], i: number): Built {
+  const line0 = lines[i]!;
+  const m = FOOTNOTE_DEF_RE.exec(line0.text)!;
+  const indent = m[1]!.length;
+  const id = m[2]!;
+  const markerLen = m[0].length - indent; // length of `[^id]:`
+  const contentCol = indent + markerLen + 1; // continuation aligns past `[^id]: `
+  let bodyStart = indent + markerLen;
+  if (line0.text[bodyStart] === ' ') bodyStart++;
+  const contentFrom = line0.from + bodyStart;
+
+  const body: Line[] = [
+    { from: contentFrom, to: line0.to, text: line0.text.slice(bodyStart) },
+  ];
+  let lastTo = line0.to;
+  let pendingBlank = false;
+  let j = i + 1;
+  while (j < lines.length) {
+    const lj = lines[j]!;
+    if (isBlank(lj)) {
+      pendingBlank = true;
+      j++;
+      continue;
+    }
+    const ind = leadingSpaces(lj.text);
+    if (ind >= contentCol) {
+      if (pendingBlank) body.push({ from: lj.from, to: lj.from, text: '' });
+      body.push({ from: lj.from + contentCol, to: lj.to, text: lj.text.slice(contentCol) });
+      lastTo = lj.to;
+      pendingBlank = false;
+      j++;
+      continue;
+    }
+    if (pendingBlank) break; // blank then unindented → def ends
+    if (isFootnoteDef(lj)) break; // sibling definition
+    if (startsOtherBlock(lj)) break; // a new block interrupts
+    if (isDefListStartAt(lines, j)) break;
+    // lazy paragraph continuation
+    body.push({ from: lj.from, to: lj.to, text: lj.text });
+    lastTo = lj.to;
+    j++;
+  }
+
+  const children = parseBlocks(body);
+  const node: FootnoteDef = { type: 'footnoteDef', from: line0.from, to: lastTo, id, children };
+  return { node, next: j };
+}
+
+/** One `: …` definition (+ its indented/lazy continuation) as a block sequence. */
+function collectDefinition(lines: Line[], idx: number): { blocks: Block[]; to: number; next: number } {
+  const line0 = lines[idx]!;
+  const m = DEF_RE.exec(line0.text)!;
+  const contentCol = m[0].length; // content begins just past `: `
+  const body: Line[] = [
+    { from: line0.from + contentCol, to: line0.to, text: line0.text.slice(contentCol) },
+  ];
+  let lastTo = line0.to;
+  let pendingBlank = false;
+  let j = idx + 1;
+  while (j < lines.length) {
+    const lj = lines[j]!;
+    if (isBlank(lj)) {
+      pendingBlank = true;
+      j++;
+      continue;
+    }
+    if (DEF_RE.test(lj.text)) break; // next definition of the same term
+    const ind = leadingSpaces(lj.text);
+    if (ind >= contentCol) {
+      if (pendingBlank) body.push({ from: lj.from, to: lj.from, text: '' });
+      body.push({ from: lj.from + contentCol, to: lj.to, text: lj.text.slice(contentCol) });
+      lastTo = lj.to;
+      pendingBlank = false;
+      j++;
+      continue;
+    }
+    if (pendingBlank) break;
+    if (startsOtherBlock(lj)) break;
+    if (isFootnoteDef(lj)) break;
+    if (isDefListStartAt(lines, j)) break; // next term/definition group
+    // lazy paragraph continuation
+    body.push({ from: lj.from, to: lj.to, text: lj.text });
+    lastTo = lj.to;
+    j++;
+  }
+  return { blocks: parseBlocks(body), to: lastTo, next: j };
+}
+
+/** A term line plus its one-or-more `: …` definitions. */
+function collectDefItem(lines: Line[], idx: number): { item: DefItem; next: number } {
+  const termLine = lines[idx]!;
+  const term = parseInlineSegs([
+    { from: termLine.from, to: termLine.to, text: termLine.text },
+  ]);
+  const definitions: Block[][] = [];
+  let lastTo = termLine.to;
+  let j = idx + 1;
+  while (j < lines.length && DEF_RE.test(lines[j]!.text)) {
+    const d = collectDefinition(lines, j);
+    definitions.push(d.blocks);
+    lastTo = d.to;
+    j = d.next;
+  }
+  const item: DefItem = { type: 'defItem', from: termLine.from, to: lastTo, term, definitions };
+  return { item, next: j };
+}
+
+/** A definition list: consecutive `term` / `: definition` groups. */
+function buildDefList(lines: Line[], start: number): Built {
+  const items: DefItem[] = [];
+  let i = start;
+  while (i < lines.length && isDefListStartAt(lines, i)) {
+    const r = collectDefItem(lines, i);
+    items.push(r.item);
+    i = r.next;
+  }
+  const node: DefList = {
+    type: 'defList',
+    from: items[0]!.from,
+    to: items[items.length - 1]!.to,
+    items,
+  };
+  return { node, next: i };
+}
+
 function buildParagraph(lines: Line[], i: number): Built {
   const para: Line[] = [lines[i]!];
   let j = i + 1;
@@ -525,6 +739,10 @@ function parseBlocks(lines: Line[]): Block[] {
       const b = buildFence(lines, i);
       out.push(b.node);
       i = b.next;
+    } else if (isMathOpen(t)) {
+      const b = buildMathBlock(lines, i);
+      out.push(b.node);
+      i = b.next;
     } else if (leadingSpaces(t) >= 4) {
       const b = buildIndentedCode(lines, i);
       out.push(b.node);
@@ -543,12 +761,20 @@ function parseBlocks(lines: Line[]): Block[] {
       const b = buildList(lines, i);
       out.push(b.node);
       i = b.next;
+    } else if (isDefListStartAt(lines, i)) {
+      const b = buildDefList(lines, i);
+      out.push(b.node);
+      i = b.next;
     } else if (isTableStartAt(lines, i)) {
       const b = buildTable(lines, i);
       out.push(b.node);
       i = b.next;
     } else if (htmlVariant(t)) {
       const b = buildHtml(lines, i);
+      out.push(b.node);
+      i = b.next;
+    } else if (isFootnoteDef(line)) {
+      const b = buildFootnoteDef(lines, i);
       out.push(b.node);
       i = b.next;
     } else {
@@ -642,6 +868,75 @@ function parseInlineSegs(segs: Seg[]): Inline[] {
       k++;
     }
     return null;
+  }
+
+  /**
+   * Inline math `$…$` (or inline-display `$$…$$`). Modeled on `tryCode`: an
+   * unterminated run returns null and degrades to literal text. Flanking rules
+   * (opener not followed by space, closer not preceded by space) keep bare `$`
+   * signs in prose — `$5 and $10` — from being read as math. `\$` is escaped.
+   */
+  function tryMath(i: number, end: number): Hit | null {
+    let n = 1;
+    while (i + n < end && buf[i + n] === '$' && n < 2) n++;
+    const after = buf[i + n];
+    if (after === undefined || after === ' ' || after === '\t' || after === '\n') return null;
+    let k = i + n;
+    while (k < end) {
+      const ch = buf[k];
+      if (ch === '\\') {
+        k += 2; // escaped char (e.g. `\$`) can't close the span
+        continue;
+      }
+      if (ch === '\n') return null; // inline math stays on one line
+      if (ch === '$') {
+        let m = 1;
+        while (k + m < end && buf[k + m] === '$' && m < 2) m++;
+        if (m === n && k > i + n) {
+          const prev = buf[k - 1];
+          if (prev !== ' ' && prev !== '\t' && prev !== '\n') {
+            const node: Math = {
+              type: 'math',
+              from: abs(i),
+              to: abs(k + n),
+              value: cap(buf.slice(i + n, k), MAX_VALUE),
+              display: n === 2,
+            };
+            return { node, endIdx: k + n };
+          }
+        }
+        k += m;
+        continue;
+      }
+      k++;
+    }
+    return null;
+  }
+
+  /**
+   * A footnote reference `[^id]`. The id scan is BOUNDED (`MAX_FOOTNOTE_ID`) and
+   * stops at the first `]`, whitespace, or nested bracket — so it is O(1) per
+   * `[` and never reintroduces the quadratic blow-up a scan-to-end would. A miss
+   * returns null and the caller falls through to `tryLink`.
+   */
+  function tryFootnoteRef(i: number, end: number): Hit | null {
+    const idStart = i + 2; // past `[^`
+    const stop = Math.min(end, idStart + MAX_FOOTNOTE_ID);
+    let k = idStart;
+    while (k < stop) {
+      const ch = buf[k];
+      if (ch === ']') break;
+      if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '[' || ch === '^') return null;
+      k++;
+    }
+    if (k >= stop || buf[k] !== ']' || k === idStart) return null;
+    const node: FootnoteRef = {
+      type: 'footnoteRef',
+      from: abs(i),
+      to: abs(k + 1),
+      id: buf.slice(idStart, k),
+    };
+    return { node, endIdx: k + 1 };
   }
 
   function tryAutolink(i: number, end: number): Hit | null {
@@ -857,6 +1152,15 @@ function parseInlineSegs(segs: Seg[]): Inline[] {
         i++;
         continue;
       }
+      if (c === '$' && opts.math) {
+        const r = tryMath(i, end);
+        if (r) {
+          commit(r);
+          continue;
+        }
+        i++;
+        continue;
+      }
       if (c === '<') {
         const r = tryAutolink(i, end);
         if (r) {
@@ -876,6 +1180,13 @@ function parseInlineSegs(segs: Seg[]): Inline[] {
         continue;
       }
       if (c === '[') {
+        if (opts.footnotes && buf[i + 1] === '^') {
+          const rf = tryFootnoteRef(i, end);
+          if (rf) {
+            commit(rf);
+            continue;
+          }
+        }
         const r = tryLink(i, end, false);
         if (r) {
           commit(r);
@@ -906,8 +1217,18 @@ function parseInlineSegs(segs: Seg[]): Inline[] {
  * Entry point
  * ------------------------------------------------------------------ */
 
-/** Parse Markdown/MDX source into an offset-exact {@link Document}. */
-export function parse(src: string): Document {
+/**
+ * Parse Markdown/MDX source into an offset-exact {@link Document}.
+ *
+ * `options` gates the opt-in extensions (math, footnotes, definition lists);
+ * every flag defaults to `false`, so `parse(src)` is unchanged from before.
+ */
+export function parse(src: string, options?: ParseOptions): Document {
+  opts = {
+    math: options?.math === true,
+    footnotes: options?.footnotes === true,
+    defLists: options?.defLists === true,
+  };
   const lines = splitLines(src);
   const children = parseBlocks(lines);
   return { type: 'document', from: 0, to: src.length, children };

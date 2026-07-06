@@ -128,6 +128,11 @@ function renderInlineNode(node: Inline): string {
       return `<a href="${attrUrl(node.url)}">${escapeHtml(node.url)}</a>`;
     case 'break':
       return node.hard ? '<br>\n' : '\n';
+    case 'math':
+      // Safe default: escaped source. A math engine replaces this in a later pass.
+      return `<code class="tw-math-src">${escapeHtml(node.value)}</code>`;
+    case 'footnoteRef':
+      return `<sup class="tw-footnote-ref">${escapeHtml(node.id)}</sup>`;
     default: {
       // Exhaustiveness guard — a new inline type must be handled above.
       const _never: never = node;
@@ -166,6 +171,19 @@ export function renderNode(node: Block): string {
     case 'htmlBlock':
       // The safety boundary: raw HTML / MDX is emitted ESCAPED, never live.
       return `<pre>${escapeHtml(node.value)}</pre>`;
+    case 'mathBlock':
+      // Safe default: escaped source. A math engine replaces this in a later pass.
+      return `<pre class="tw-math-src">${escapeHtml(node.value)}</pre>`;
+    case 'footnoteDef':
+      return `<div class="tw-footnote-def">${renderBlocks(node.children)}</div>`;
+    case 'defList': {
+      let out = '';
+      for (const item of node.items) {
+        out += `<dt>${renderInline(item.term)}</dt>`;
+        for (const def of item.definitions) out += `<dd>${renderBlocks(def)}</dd>`;
+      }
+      return `<dl>${out}</dl>`;
+    }
     default: {
       const _never: never = node;
       return _never as never;
