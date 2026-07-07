@@ -50,6 +50,7 @@ import type {
   TextNode,
   ThematicBreak,
 } from './ast';
+import type { Change } from './text';
 
 /* ------------------------------------------------------------------ *
  * Bounds — keep user/model-controlled strings sensibly capped.
@@ -1232,4 +1233,197 @@ export function parse(src: string, options?: ParseOptions): Document {
   const lines = splitLines(src);
   const children = parseBlocks(lines);
   return { type: 'document', from: 0, to: src.length, children };
+}
+
+/* ------------------------------------------------------------------ *
+ * Incremental reparse
+ *
+ * `parseIncremental` returns a document DEEP-EQUAL to `parse(nextSrc, options)`
+ * but computed by reusing the leading top-level blocks of a previous parse that
+ * the edit provably cannot have touched, then reparsing from the first safe block
+ * boundary at/before the edit through to the end of `nextSrc`.
+ *
+ * Correctness rests on one invariant: every reused block's parse depends only on
+ * the source PREFIX before the reparse cut, and that prefix is byte-identical in
+ * `prevSrc` and `nextSrc` (the edit is entirely at/after the cut). Whenever a safe
+ * cut cannot be cheaply proven, we fall back to a full `parse` — a correct result
+ * is never sacrificed for a fast one. The reparse always runs to end-of-document,
+ * so nodes after the edit are freshly built (never re-offset), keeping offsets
+ * exact without a shift pass. The one-way property test in
+ * `parser.incremental.test.ts` is the oracle that enforces the deep-equality.
+ * ------------------------------------------------------------------ */
+
+/** Instrumentation about what an incremental reparse reused vs rebuilt. */
+export interface IncrementalStats {
+  /** True when the fast path bailed and a full {@link parse} produced the result. */
+  fellBack: boolean;
+  /** Count of leading top-level blocks reused verbatim from the previous document. */
+  reusedBlocks: number;
+  /** Line index in `nextSrc` from which blocks were reparsed (0 ⇒ whole document). */
+  reparsedFromLine: number;
+  /** Total number of content lines in `nextSrc`. */
+  totalLines: number;
+}
+
+/** The document plus {@link IncrementalStats} from {@link parseIncrementalWithStats}. */
+export interface IncrementalResult {
+  doc: Document;
+  stats: IncrementalStats;
+}
+
+type HeadSafety = 'always' | 'needs-blank' | 'never';
+
+/**
+ * How safe it is to keep `block` as the LAST block of the reused prefix — i.e.
+ * whether, once the source AFTER it changes, `block`'s parse could grow past the
+ * cut and swallow the new content.
+ *
+ *  - `always`      self-delimiting or single-line: its extent never depends on
+ *                  what follows (heading, thematic break, or a *closed* fenced /
+ *                  `$$` block — an unclosed one runs to EOF and so is never an
+ *                  interior block).
+ *  - `needs-blank` terminates only at a blank line: safe **iff** a blank line
+ *                  sits between it and the cut. That blank, being before the edit,
+ *                  is preserved in `nextSrc`, so no edit can un-terminate it.
+ *  - `never`       lazily continues across blank lines by indentation, so a later
+ *                  edit could indent a following line into it — indented code,
+ *                  lists, footnote definitions and definition lists.
+ */
+function headSafety(block: Block): HeadSafety {
+  switch (block.type) {
+    case 'heading':
+    case 'thematicBreak':
+    case 'mathBlock':
+      return 'always';
+    case 'codeBlock':
+      return block.fenced ? 'always' : 'never';
+    case 'paragraph':
+    case 'table':
+    case 'htmlBlock':
+    case 'blockquote':
+      return 'needs-blank';
+    default:
+      // list, footnoteDef, defList — loose/lazy continuation across blanks.
+      return 'never';
+  }
+}
+
+/** Is the source line ending just before `lineStart` (itself a line start) blank? */
+function prevLineIsBlank(src: string, lineStart: number): boolean {
+  if (lineStart <= 0) return false;
+  // `lineStart` is a line start ⇒ `src[lineStart - 1]` is the '\n' ending the
+  // previous line. Walk back to that line's own start and test it for blankness.
+  const end = lineStart - 1;
+  let start = end - 1;
+  while (start >= 0 && src[start] !== '\n') start--;
+  start += 1;
+  return src.slice(start, end).trim() === '';
+}
+
+/** Index of the line in `lines` that begins exactly at offset `off`, or -1. */
+function lineStartingAt(lines: Line[], off: number): number {
+  let lo = 0;
+  let hi = lines.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const f = lines[mid]!.from;
+    if (f === off) return mid;
+    if (f < off) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return -1;
+}
+
+/** Largest index `k` with `blocks[k].from <= off` (blocks are offset-ordered), or -1. */
+function lastBlockAtOrBefore(blocks: Block[], off: number): number {
+  let lo = 0;
+  let hi = blocks.length - 1;
+  let ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (blocks[mid]!.from <= off) {
+      ans = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return ans;
+}
+
+function runIncremental(
+  prev: Document,
+  prevSrc: string,
+  change: Change,
+  nextSrc: string,
+  options: ParseOptions | undefined,
+): IncrementalResult {
+  const nextLines = splitLines(nextSrc);
+  const full = (): IncrementalResult => ({
+    doc: parse(nextSrc, options),
+    stats: { fellBack: true, reusedBlocks: 0, reparsedFromLine: 0, totalLines: nextLines.length },
+  });
+
+  // Normalize + validate the change against prevSrc. A malformed or inconsistent
+  // change is never trusted — a correct full parse is always the safe answer.
+  const from = Math.max(0, Math.min(change.from, change.to));
+  const to = Math.min(prevSrc.length, Math.max(change.from, change.to));
+  if (to < from) return full();
+  if (nextSrc.length !== prevSrc.length + change.insert.length - (to - from)) return full();
+  // Every candidate cut satisfies `cut <= from`, so a single check that the
+  // prefix `[0, from)` is byte-identical proves every reused prefix identical.
+  if (prevSrc.slice(0, from) !== nextSrc.slice(0, from)) return full();
+
+  const blocks = prev.children;
+  const hi = Math.min(blocks.length - 1, lastBlockAtOrBefore(blocks, from));
+  for (let k = hi; k >= 1; k--) {
+    const cut = blocks[k]!.from; // reuse blocks[0..k-1]; reparse from `cut` to EOF
+    if (cut > from) continue; // head must lie entirely before the edit
+    const safety = headSafety(blocks[k - 1]!);
+    if (safety === 'never') continue;
+    if (safety === 'needs-blank' && !prevLineIsBlank(prevSrc, cut)) continue;
+    const c = lineStartingAt(nextLines, cut);
+    if (c < 0) continue; // `cut` is not a line start in nextSrc (should not happen)
+
+    // The reparse runs `parseBlocks`, which reads the module-scoped `opts`; set
+    // them from `options` so the reparsed tail matches a full parse exactly.
+    opts = {
+      math: options?.math === true,
+      footnotes: options?.footnotes === true,
+      defLists: options?.defLists === true,
+    };
+    const tail = parseBlocks(nextLines.slice(c));
+    const children = blocks.slice(0, k).concat(tail);
+    return {
+      doc: { type: 'document', from: 0, to: nextSrc.length, children },
+      stats: { fellBack: false, reusedBlocks: k, reparsedFromLine: c, totalLines: nextLines.length },
+    };
+  }
+  return full();
+}
+
+/**
+ * Incrementally reparse `prev` (the parse of `prevSrc`) after a single
+ * {@link Change} produced `nextSrc`. The result is deep-equal to
+ * `parse(nextSrc, options)`; pass the SAME `options` that produced `prev`.
+ */
+export function parseIncremental(
+  prev: Document,
+  prevSrc: string,
+  change: Change,
+  nextSrc: string,
+  options?: ParseOptions,
+): Document {
+  return runIncremental(prev, prevSrc, change, nextSrc, options).doc;
+}
+
+/** {@link parseIncremental} plus {@link IncrementalStats} about what was reused. */
+export function parseIncrementalWithStats(
+  prev: Document,
+  prevSrc: string,
+  change: Change,
+  nextSrc: string,
+  options?: ParseOptions,
+): IncrementalResult {
+  return runIncremental(prev, prevSrc, change, nextSrc, options);
 }
