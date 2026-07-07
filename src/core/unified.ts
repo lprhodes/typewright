@@ -12,7 +12,14 @@
 import { walk } from './ast';
 import type { Document, Pos } from './ast';
 
-/** A hideable syntax-marker range: `[from, to)` with a `kind` tag. */
+/**
+ * A hideable syntax-marker range: `[from, to)` with a `kind` tag.
+ *
+ * `kind` is an open string (not a closed union) so new marker families can be
+ * added without a breaking type change. The kinds currently emitted are
+ * `heading`, `emphasis`, `strong`, `strike`, `code`, `link`, `image`,
+ * `listMarker`, `math`, `footnoteRef`, `fence` and `blockquote`.
+ */
 export interface Marker extends Pos {
   kind: string;
 }
@@ -22,9 +29,16 @@ export interface Marker extends Pos {
  *
  * Covers: heading `#… ` prefixes, the two emphasis/strong/strike delimiter runs
  * on each side, inline-code backtick fences, link `[`/`](`/url/`)` pieces, the
- * image `!` (plus its bracket/paren pieces), and list-item markers.
+ * image `!` (plus its bracket/paren pieces), list-item markers, inline-math `$`
+ * (or `$$`) delimiters, and footnote-reference `[^`/`]` brackets.
+ *
+ * When the original `source` string is supplied it additionally emits the
+ * `fence` (opening + closing fenced-code lines) and `blockquote` (the leading
+ * `>` run on each quoted line) markers — these need the raw text to be
+ * offset-exact, so they are omitted when `source` is not passed (keeping the
+ * source-free call identical to before). Always pure; never mutates.
  */
-export function collectMarkers(doc: Document): Marker[] {
+export function collectMarkers(doc: Document, source?: string): Marker[] {
   const markers: Marker[] = [];
   const push = (from: number, to: number, kind: string): void => {
     if (to > from) markers.push({ from, to, kind });
@@ -86,6 +100,68 @@ export function collectMarkers(doc: Document): Marker[] {
         push(node.from, node.contentFrom, 'listMarker');
         break;
       }
+      case 'math': {
+        // The `$` (inline) / `$$` (display) fences on each side of the source.
+        const delim = node.display ? 2 : 1;
+        const openTo = Math.min(node.from + delim, node.to);
+        const closeFrom = Math.max(node.to - delim, openTo);
+        push(node.from, openTo, 'math'); // opening `$`/`$$`
+        push(closeFrom, node.to, 'math'); // closing `$`/`$$`
+        break;
+      }
+      case 'footnoteRef': {
+        // `[^` opener and `]` closer; the id between them stays as content.
+        const openTo = Math.min(node.from + 2, node.to);
+        const closeFrom = Math.max(node.to - 1, openTo);
+        push(node.from, openTo, 'footnoteRef'); // `[^`
+        push(closeFrom, node.to, 'footnoteRef'); // `]`
+        break;
+      }
+      case 'codeBlock': {
+        // Only *fenced* blocks have marker lines (indented code has none), and
+        // we need the raw text to locate the fence lines offset-exactly.
+        if (!source || !node.fenced) break;
+        // Opening fence line: the ``` `` ``/`~~~` run + info string, up to the
+        // end of that first source line (the trailing newline is excluded).
+        let openTo = source.indexOf('\n', node.from);
+        if (openTo === -1 || openTo > node.to) openTo = node.to;
+        if (openTo > node.from && source[openTo - 1] === '\r') openTo--;
+        push(node.from, openTo, 'fence'); // opening fence line
+        // Closing fence line: the block's last source line, emitted only when it
+        // is a real closing fence. An unterminated fence's last line is content
+        // (the parser would have closed on a genuine fence line), so the regex
+        // check never false-fires; a container-nested close that does not sit at
+        // the physical line start simply isn't emitted (never a wrong offset).
+        const closeStart = source.lastIndexOf('\n', node.to - 1) + 1;
+        if (closeStart > node.from) {
+          const closeText = source.slice(closeStart, node.to);
+          const cm = /^( {0,3})(`{3,}|~{3,}) *$/.exec(closeText);
+          const om = /^ {0,3}([`~])/.exec(source.slice(node.from, openTo));
+          if (cm && om && cm[2]![0] === om[1]) push(closeStart, node.to, 'fence'); // closing fence line
+        }
+        break;
+      }
+      case 'blockquote': {
+        if (!source) break;
+        // Emit the leading `>` run per line only for a *root* blockquote whose
+        // first line starts at a physical line boundary. For such a blockquote
+        // every line in [from,to) begins with its quote run, which we can read
+        // directly and offset-exactly. A blockquote nested inside another (its
+        // `from` sits after an outer `>` prefix) is skipped — its prefixes are
+        // already covered by the outer root's full per-line run.
+        const lineStart = source.lastIndexOf('\n', node.from - 1) + 1;
+        if (lineStart !== node.from) break;
+        let p = node.from;
+        while (p < node.to) {
+          let end = source.indexOf('\n', p);
+          if (end === -1 || end > node.to) end = node.to;
+          // The stacked quote prefix on this line: `( {0,3}> ?)+`.
+          const qm = /^(?: {0,3}> ?)+/.exec(source.slice(p, end));
+          if (qm) push(p, p + qm[0].length, 'blockquote');
+          p = end + 1; // step over the newline; exits when end === node.to
+        }
+        break;
+      }
     }
     return true;
   });
@@ -98,13 +174,21 @@ export function collectMarkers(doc: Document): Marker[] {
  * does NOT intersect the selection widened by 1 on each side. Markers that DO
  * intersect are revealed (returned excluded), so the caret can edit the raw
  * syntax it sits on — the live-preview reveal rule.
+ *
+ * `source` is forwarded to {@link collectMarkers} so the fence/blockquote
+ * markers participate in the reveal too; omit it to keep the source-free set.
+ * The selection filter itself is unchanged.
  */
-export function hiddenMarkers(doc: Document, sel: { from: number; to: number }): Marker[] {
+export function hiddenMarkers(
+  doc: Document,
+  sel: { from: number; to: number },
+  source?: string,
+): Marker[] {
   const lo = Math.min(sel.from, sel.to) - 1;
   const hi = Math.max(sel.from, sel.to) + 1;
   // Half-open overlap of marker [from,to) with widened selection [lo,hi).
   const intersects = (m: Marker): boolean => m.from < hi && lo < m.to;
-  return collectMarkers(doc).filter((m) => !intersects(m));
+  return collectMarkers(doc, source).filter((m) => !intersects(m));
 }
 
 /**

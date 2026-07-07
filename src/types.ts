@@ -39,18 +39,52 @@ export interface GfmFeatures {
 
 export interface MermaidOptions {
   enabled: boolean;
-  /** Mermaid theme name; diagrams render inside the isolated sandbox. */
+  /**
+   * Mermaid theme name (e.g. `'default'`, `'forest'`). Reserved: the value is
+   * not yet applied to the sandboxed diagram — the sandbox currently follows the
+   * editor's light/dark appearance only. Kept as forward-compatible API surface.
+   */
   theme?: string;
+  /**
+   * Supplies the Mermaid engine to run **inside** the opaque-origin sandbox.
+   * Returns the engine's JavaScript *source*, which Typewright inlines as an
+   * `<script>` in the sandbox document. Source is used (rather than a script
+   * URL) deliberately: the sandbox CSP is `script-src 'unsafe-inline'` only, so
+   * an inline engine needs no CSP relaxation and no cross-origin fetch. The
+   * injected source is expected to expose either a global
+   * `self.__twMermaidRender(src): Promise<string>` returning SVG, or the
+   * standard `self.mermaid` object (`mermaid.render(id, src)`). May be async so
+   * the host can lazy-load the engine. Without it, `mermaid` fences render as a
+   * plain code block (unchanged v0.1 behaviour).
+   */
+  getEngine?: () => Promise<string> | string;
 }
 
 export interface MathOptions {
   enabled: boolean;
+  /**
+   * Advisory hint only, reserved: the renderer does not read `engine` — math is
+   * rendered solely via the host-supplied {@link MathOptions.render} function
+   * (regardless of this value). Kept as forward-compatible API surface.
+   */
   engine?: 'katex' | 'custom';
+  /**
+   * Host-supplied math renderer — the actual path that renders math. Given the
+   * raw `$…$` / `$$…$$` source and whether it is display (block) math, returns
+   * **already-sanitized** HTML that the renderer inserts verbatim. The host owns
+   * sanitization (e.g. KaTeX with `trust: false`). Without a `render` fn, math
+   * renders as escaped source — enabling math without one has no visible effect.
+   */
+  render?: (src: string, display: boolean) => string;
 }
 
 export interface SyntaxHighlightOptions {
   enabled: boolean;
-  /** Highlight theme name. Editor highlighting is native; this is for previews. */
+  /**
+   * Highlight theme name. Reserved: not yet applied — token colours currently
+   * follow the editor's built-in native theme (light/dark) for both the editor
+   * and previews. Kept as forward-compatible API surface.
+   */
   theme?: string;
 }
 
@@ -154,12 +188,103 @@ export interface DocChange {
 }
 
 /* ------------------------------------------------------------------ *
+ * Collaboration — comments & presence
+ * ------------------------------------------------------------------ *
+ * Controlled, data-in/events-out surfaces (mirror the `value`/`onChange`
+ * idiom): the host owns the data and the library stores nothing. Comment
+ * anchors are document offset ranges that survive edits via position mapping.
+ */
+
+/** A single reply within a comment thread. */
+export interface CommentReply {
+  id: string;
+  author: string;
+  body: string;
+  /** ISO-8601 timestamp; host-supplied. */
+  createdAt?: string;
+}
+
+/** A comment thread anchored to a document range. */
+export interface CommentThread {
+  id: string;
+  /** Document offset range the thread is attached to. */
+  anchor: { from: number; to: number };
+  /** Snapshot of the anchored text at creation time. */
+  quote?: string;
+  author: string;
+  body: string;
+  /** ISO-8601 timestamp; host-supplied. */
+  createdAt?: string;
+  resolved?: boolean;
+  /** Emoji → list of user ids that reacted with it. */
+  reactions?: Record<string, string[]>;
+  replies: CommentReply[];
+}
+
+/** Comments configuration: threads in, edit intents out. */
+export interface CommentsOptions {
+  enabled?: boolean;
+  /** All threads to render; the host is the source of truth. */
+  threads: CommentThread[];
+  /** The current user, used to author new threads/replies/reactions. */
+  me?: { id: string; name: string };
+  /** Fired when the user creates a thread from a selection. */
+  onCreate?: (t: { anchor: { from: number; to: number }; quote: string; body: string }) => void;
+  onReply?: (threadId: string, body: string) => void;
+  onReact?: (threadId: string, emoji: string) => void;
+  onResolve?: (threadId: string, resolved: boolean) => void;
+  onDelete?: (threadId: string) => void;
+}
+
+/** A remote collaborator whose cursor/selection is rendered live. */
+export interface PresencePeer {
+  id: string;
+  name: string;
+  /** Cursor/selection colour (any CSS colour). */
+  color?: string;
+  /** Current selection as a document offset range; caret if `from === to`. */
+  cursor?: { from: number; to: number };
+}
+
+/* ------------------------------------------------------------------ *
+ * Settings / command palette
+ * ------------------------------------------------------------------ */
+
+/** A host-extensible entry surfaced in the command palette. */
+export interface SettingsCommand {
+  id: string;
+  label: string;
+  run: () => void;
+}
+
+/** Settings panel + ⌘K command palette configuration. */
+export interface SettingsOptions {
+  enabled?: boolean;
+  /** Extra palette entries appended to the built-in commands. */
+  commands?: SettingsCommand[];
+}
+
+/* ------------------------------------------------------------------ *
  * Editor configuration + events
  * ------------------------------------------------------------------ */
 
 export interface EditorConfig {
   value?: string;
   mode?: EditorMode;
+  /**
+   * How the raw syntax markers are revealed in `unified` mode.
+   *
+   * - `block`  (default) Click-to-reveal: clicking a rendered block swaps the
+   *            whole block for its raw Markdown source — today's behaviour.
+   * - `caret`  Per-marker reveal around the caret: only the markers the caret
+   *            sits on (a `**`, a `](url)`, a fence line, …) reveal, live, as
+   *            the caret moves. Opt-in; contentEditable-backed, with IME handled
+   *            by the platform's composition (not reimplemented).
+   *
+   * Additive and backward-compatible — omitting it keeps the `block` default,
+   * so existing embeds are unaffected.
+   */
+  unifiedReveal?: 'block' | 'caret';
   extensions?: Extensions;
   folding?: boolean | FoldingOptions;
   readOnly?: boolean;
@@ -173,6 +298,18 @@ export interface EditorConfig {
   toolbar?: boolean | 'docked' | 'floating';
   /** Lines rendered outside the viewport bounds (virtualization overscan). */
   overscan?: number;
+  /**
+   * Inline comments & threads. `true` enables the surface with no threads;
+   * pass {@link CommentsOptions} to supply threads and edit callbacks.
+   */
+  comments?: boolean | CommentsOptions;
+  /** Remote collaborators whose cursors/selections render live (data-in). */
+  presence?: PresencePeer[];
+  /**
+   * Settings panel + ⌘K command palette. `true` enables the built-ins;
+   * pass {@link SettingsOptions} to append host commands.
+   */
+  settings?: boolean | SettingsOptions;
 }
 
 export interface EditorEvents {

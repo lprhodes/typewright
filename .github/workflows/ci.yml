@@ -27,5 +27,8 @@ jobs:
       - name: Build
         run: pnpm run build
 
+      - name: Size budget (hard gate)
+        run: pnpm run size
+
       - name: Test
         run: pnpm run test

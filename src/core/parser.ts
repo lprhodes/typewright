@@ -17,14 +17,20 @@
  *    degrade to text (or run to end-of-input) rather than failing.
  */
 
+import { walk } from './ast';
 import type {
+  AstNode,
   Autolink,
   Block,
   Blockquote,
   CellAlign,
   CodeBlock,
+  DefItem,
+  DefList,
   Document,
   Emphasis,
+  FootnoteDef,
+  FootnoteRef,
   Heading,
   HtmlBlock,
   Image,
@@ -34,7 +40,10 @@ import type {
   Link,
   List,
   ListItem,
+  Math,
+  MathBlock,
   Paragraph,
+  ParseOptions,
   Strikethrough,
   Strong,
   Table,
@@ -43,6 +52,7 @@ import type {
   TextNode,
   ThematicBreak,
 } from './ast';
+import type { Change } from './text';
 
 /* ------------------------------------------------------------------ *
  * Bounds — keep user/model-controlled strings sensibly capped.
@@ -53,8 +63,28 @@ const MAX_TITLE = 1024;
 const MAX_ALT = 4096;
 const MAX_LANG = 256;
 const MAX_VALUE = 1_000_000;
+/** Footnote labels are short tokens; this caps the `[^…]` lookahead to O(1). */
+const MAX_FOOTNOTE_ID = 256;
 
 const cap = (s: string, n: number): string => (s.length > n ? s.slice(0, n) : s);
+
+/* ------------------------------------------------------------------ *
+ * Opt-in extensions (math / footnotes / definition lists)
+ *
+ * All three default to `false`, so `parse(src)` is byte-for-byte what it always
+ * was. The resolved flags live in module scope and are set once per `parse()`
+ * call; parsing is synchronous and non-reentrant across calls, and every nested
+ * `parseBlocks` within a single call shares the same flags — so this reads like
+ * a closure variable without threading an argument through every builder.
+ * ------------------------------------------------------------------ */
+
+interface ResolvedOptions {
+  math: boolean;
+  footnotes: boolean;
+  defLists: boolean;
+}
+
+let opts: ResolvedOptions = { math: false, footnotes: false, defLists: false };
 
 /* ------------------------------------------------------------------ *
  * Line model
@@ -165,17 +195,50 @@ function isTableStartAt(lines: Line[], j: number): boolean {
   return line.text.includes('|') && isDelimRow(next.text);
 }
 
+/* --- opt-in detectors (inert unless the matching flag is on) --- */
+
+/** A `$$` display-math fence on its own line (opener or closer). */
+const MATH_FENCE_RE = /^ {0,3}\$\$[ \t]*$/;
+const isMathOpen = (t: string): boolean => opts.math && MATH_FENCE_RE.test(t);
+
+/** A `[^id]:` footnote definition line. Never collides with `ITEM_RE`. */
+const FOOTNOTE_DEF_RE = /^( {0,3})\[\^([^\]\s]+)\]:/;
+const isFootnoteDef = (line: Line): boolean => opts.footnotes && FOOTNOTE_DEF_RE.test(line.text);
+
+/** A `: …` definition-list definition line (up to 3 leading spaces). */
+const DEF_RE = /^( {0,3}):[ \t]+/;
+
+/**
+ * Does line `j` open a definition list? Conservative: line `j` must be a plain
+ * term (a line that would otherwise be a paragraph — not another block) and the
+ * *immediately* following line must be a `: …` definition. The term guard reuses
+ * `startsBlock` (which never recurses into this check), so a heading/quote/table
+ * term is rejected.
+ */
+function isDefListStartAt(lines: Line[], j: number): boolean {
+  if (!opts.defLists) return false;
+  const line = lines[j];
+  const next = lines[j + 1];
+  if (!line || !next) return false;
+  if (isBlank(line)) return false;
+  if (startsBlock(lines, j)) return false; // term must not be another block
+  return DEF_RE.test(next.text);
+}
+
 /** Does line `j` begin a non-paragraph block (so a paragraph must stop)? */
 function startsBlock(lines: Line[], j: number): boolean {
-  const t = lines[j]!.text;
+  const line = lines[j]!;
+  const t = line.text;
   return (
     isFence(t) ||
     isAtx(t) ||
     isThematic(t) ||
     isQuote(t) ||
-    detectItem(lines[j]!) !== null ||
+    detectItem(line) !== null ||
     htmlVariant(t) !== null ||
-    isTableStartAt(lines, j)
+    isTableStartAt(lines, j) ||
+    isMathOpen(t) ||
+    isFootnoteDef(line)
   );
 }
 
@@ -188,7 +251,9 @@ function startsOtherBlock(line: Line): boolean {
     isThematic(t) ||
     isQuote(t) ||
     detectItem(line) !== null ||
-    htmlVariant(t) !== null
+    htmlVariant(t) !== null ||
+    isMathOpen(t) ||
+    isFootnoteDef(line)
   );
 }
 
@@ -255,6 +320,27 @@ function buildFence(lines: Line[], i: number): Built {
   );
   const to = closeTo ?? (inner.length ? inner[inner.length - 1]!.to : open.to);
   return { node: { type: 'codeBlock', from: open.from, to, lang, value, fenced: true }, next: j };
+}
+
+/** A `$$` … `$$` display-math block. Unterminated → runs to end (like a fence). */
+function buildMathBlock(lines: Line[], i: number): Built {
+  const open = lines[i]!;
+  const inner: Line[] = [];
+  let j = i + 1;
+  let closeTo: number | null = null;
+  while (j < lines.length) {
+    if (MATH_FENCE_RE.test(lines[j]!.text)) {
+      closeTo = lines[j]!.to;
+      j++;
+      break;
+    }
+    inner.push(lines[j]!);
+    j++;
+  }
+  const value = cap(inner.map((l) => l.text).join('\n'), MAX_VALUE);
+  const to = closeTo ?? (inner.length ? inner[inner.length - 1]!.to : open.to);
+  const node: MathBlock = { type: 'mathBlock', from: open.from, to, value };
+  return { node, next: j };
 }
 
 function buildIndentedCode(lines: Line[], i: number): Built {
@@ -491,6 +577,137 @@ function buildHtml(lines: Line[], i: number): Built {
   return { node: { type: 'htmlBlock', from, to, value, variant }, next: j };
 }
 
+/**
+ * A `[^id]: …` footnote definition. Its body — the text after `]: ` plus any
+ * indented / lazily-continued following lines — is parsed as nested blocks
+ * (mirroring `collectItem`'s continuation model), so a def can hold paragraphs,
+ * lists, code, etc.
+ */
+function buildFootnoteDef(lines: Line[], i: number): Built {
+  const line0 = lines[i]!;
+  const m = FOOTNOTE_DEF_RE.exec(line0.text)!;
+  const indent = m[1]!.length;
+  const id = m[2]!;
+  const markerLen = m[0].length - indent; // length of `[^id]:`
+  const contentCol = indent + markerLen + 1; // continuation aligns past `[^id]: `
+  let bodyStart = indent + markerLen;
+  if (line0.text[bodyStart] === ' ') bodyStart++;
+  const contentFrom = line0.from + bodyStart;
+
+  const body: Line[] = [
+    { from: contentFrom, to: line0.to, text: line0.text.slice(bodyStart) },
+  ];
+  let lastTo = line0.to;
+  let pendingBlank = false;
+  let j = i + 1;
+  while (j < lines.length) {
+    const lj = lines[j]!;
+    if (isBlank(lj)) {
+      pendingBlank = true;
+      j++;
+      continue;
+    }
+    const ind = leadingSpaces(lj.text);
+    if (ind >= contentCol) {
+      if (pendingBlank) body.push({ from: lj.from, to: lj.from, text: '' });
+      body.push({ from: lj.from + contentCol, to: lj.to, text: lj.text.slice(contentCol) });
+      lastTo = lj.to;
+      pendingBlank = false;
+      j++;
+      continue;
+    }
+    if (pendingBlank) break; // blank then unindented → def ends
+    if (isFootnoteDef(lj)) break; // sibling definition
+    if (startsOtherBlock(lj)) break; // a new block interrupts
+    if (isDefListStartAt(lines, j)) break;
+    // lazy paragraph continuation
+    body.push({ from: lj.from, to: lj.to, text: lj.text });
+    lastTo = lj.to;
+    j++;
+  }
+
+  const children = parseBlocks(body);
+  const node: FootnoteDef = { type: 'footnoteDef', from: line0.from, to: lastTo, id, children };
+  return { node, next: j };
+}
+
+/** One `: …` definition (+ its indented/lazy continuation) as a block sequence. */
+function collectDefinition(lines: Line[], idx: number): { blocks: Block[]; to: number; next: number } {
+  const line0 = lines[idx]!;
+  const m = DEF_RE.exec(line0.text)!;
+  const contentCol = m[0].length; // content begins just past `: `
+  const body: Line[] = [
+    { from: line0.from + contentCol, to: line0.to, text: line0.text.slice(contentCol) },
+  ];
+  let lastTo = line0.to;
+  let pendingBlank = false;
+  let j = idx + 1;
+  while (j < lines.length) {
+    const lj = lines[j]!;
+    if (isBlank(lj)) {
+      pendingBlank = true;
+      j++;
+      continue;
+    }
+    if (DEF_RE.test(lj.text)) break; // next definition of the same term
+    const ind = leadingSpaces(lj.text);
+    if (ind >= contentCol) {
+      if (pendingBlank) body.push({ from: lj.from, to: lj.from, text: '' });
+      body.push({ from: lj.from + contentCol, to: lj.to, text: lj.text.slice(contentCol) });
+      lastTo = lj.to;
+      pendingBlank = false;
+      j++;
+      continue;
+    }
+    if (pendingBlank) break;
+    if (startsOtherBlock(lj)) break;
+    if (isFootnoteDef(lj)) break;
+    if (isDefListStartAt(lines, j)) break; // next term/definition group
+    // lazy paragraph continuation
+    body.push({ from: lj.from, to: lj.to, text: lj.text });
+    lastTo = lj.to;
+    j++;
+  }
+  return { blocks: parseBlocks(body), to: lastTo, next: j };
+}
+
+/** A term line plus its one-or-more `: …` definitions. */
+function collectDefItem(lines: Line[], idx: number): { item: DefItem; next: number } {
+  const termLine = lines[idx]!;
+  const term = parseInlineSegs([
+    { from: termLine.from, to: termLine.to, text: termLine.text },
+  ]);
+  const definitions: Block[][] = [];
+  let lastTo = termLine.to;
+  let j = idx + 1;
+  while (j < lines.length && DEF_RE.test(lines[j]!.text)) {
+    const d = collectDefinition(lines, j);
+    definitions.push(d.blocks);
+    lastTo = d.to;
+    j = d.next;
+  }
+  const item: DefItem = { type: 'defItem', from: termLine.from, to: lastTo, term, definitions };
+  return { item, next: j };
+}
+
+/** A definition list: consecutive `term` / `: definition` groups. */
+function buildDefList(lines: Line[], start: number): Built {
+  const items: DefItem[] = [];
+  let i = start;
+  while (i < lines.length && isDefListStartAt(lines, i)) {
+    const r = collectDefItem(lines, i);
+    items.push(r.item);
+    i = r.next;
+  }
+  const node: DefList = {
+    type: 'defList',
+    from: items[0]!.from,
+    to: items[items.length - 1]!.to,
+    items,
+  };
+  return { node, next: i };
+}
+
 function buildParagraph(lines: Line[], i: number): Built {
   const para: Line[] = [lines[i]!];
   let j = i + 1;
@@ -525,6 +742,10 @@ function parseBlocks(lines: Line[]): Block[] {
       const b = buildFence(lines, i);
       out.push(b.node);
       i = b.next;
+    } else if (isMathOpen(t)) {
+      const b = buildMathBlock(lines, i);
+      out.push(b.node);
+      i = b.next;
     } else if (leadingSpaces(t) >= 4) {
       const b = buildIndentedCode(lines, i);
       out.push(b.node);
@@ -543,12 +764,20 @@ function parseBlocks(lines: Line[]): Block[] {
       const b = buildList(lines, i);
       out.push(b.node);
       i = b.next;
+    } else if (isDefListStartAt(lines, i)) {
+      const b = buildDefList(lines, i);
+      out.push(b.node);
+      i = b.next;
     } else if (isTableStartAt(lines, i)) {
       const b = buildTable(lines, i);
       out.push(b.node);
       i = b.next;
     } else if (htmlVariant(t)) {
       const b = buildHtml(lines, i);
+      out.push(b.node);
+      i = b.next;
+    } else if (isFootnoteDef(line)) {
+      const b = buildFootnoteDef(lines, i);
       out.push(b.node);
       i = b.next;
     } else {
@@ -642,6 +871,75 @@ function parseInlineSegs(segs: Seg[]): Inline[] {
       k++;
     }
     return null;
+  }
+
+  /**
+   * Inline math `$…$` (or inline-display `$$…$$`). Modeled on `tryCode`: an
+   * unterminated run returns null and degrades to literal text. Flanking rules
+   * (opener not followed by space, closer not preceded by space) keep bare `$`
+   * signs in prose — `$5 and $10` — from being read as math. `\$` is escaped.
+   */
+  function tryMath(i: number, end: number): Hit | null {
+    let n = 1;
+    while (i + n < end && buf[i + n] === '$' && n < 2) n++;
+    const after = buf[i + n];
+    if (after === undefined || after === ' ' || after === '\t' || after === '\n') return null;
+    let k = i + n;
+    while (k < end) {
+      const ch = buf[k];
+      if (ch === '\\') {
+        k += 2; // escaped char (e.g. `\$`) can't close the span
+        continue;
+      }
+      if (ch === '\n') return null; // inline math stays on one line
+      if (ch === '$') {
+        let m = 1;
+        while (k + m < end && buf[k + m] === '$' && m < 2) m++;
+        if (m === n && k > i + n) {
+          const prev = buf[k - 1];
+          if (prev !== ' ' && prev !== '\t' && prev !== '\n') {
+            const node: Math = {
+              type: 'math',
+              from: abs(i),
+              to: abs(k + n),
+              value: cap(buf.slice(i + n, k), MAX_VALUE),
+              display: n === 2,
+            };
+            return { node, endIdx: k + n };
+          }
+        }
+        k += m;
+        continue;
+      }
+      k++;
+    }
+    return null;
+  }
+
+  /**
+   * A footnote reference `[^id]`. The id scan is BOUNDED (`MAX_FOOTNOTE_ID`) and
+   * stops at the first `]`, whitespace, or nested bracket — so it is O(1) per
+   * `[` and never reintroduces the quadratic blow-up a scan-to-end would. A miss
+   * returns null and the caller falls through to `tryLink`.
+   */
+  function tryFootnoteRef(i: number, end: number): Hit | null {
+    const idStart = i + 2; // past `[^`
+    const stop = Math.min(end, idStart + MAX_FOOTNOTE_ID);
+    let k = idStart;
+    while (k < stop) {
+      const ch = buf[k];
+      if (ch === ']') break;
+      if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '[' || ch === '^') return null;
+      k++;
+    }
+    if (k >= stop || buf[k] !== ']' || k === idStart) return null;
+    const node: FootnoteRef = {
+      type: 'footnoteRef',
+      from: abs(i),
+      to: abs(k + 1),
+      id: buf.slice(idStart, k),
+    };
+    return { node, endIdx: k + 1 };
   }
 
   function tryAutolink(i: number, end: number): Hit | null {
@@ -857,6 +1155,15 @@ function parseInlineSegs(segs: Seg[]): Inline[] {
         i++;
         continue;
       }
+      if (c === '$' && opts.math) {
+        const r = tryMath(i, end);
+        if (r) {
+          commit(r);
+          continue;
+        }
+        i++;
+        continue;
+      }
       if (c === '<') {
         const r = tryAutolink(i, end);
         if (r) {
@@ -876,6 +1183,13 @@ function parseInlineSegs(segs: Seg[]): Inline[] {
         continue;
       }
       if (c === '[') {
+        if (opts.footnotes && buf[i + 1] === '^') {
+          const rf = tryFootnoteRef(i, end);
+          if (rf) {
+            commit(rf);
+            continue;
+          }
+        }
         const r = tryLink(i, end, false);
         if (r) {
           commit(r);
@@ -906,9 +1220,384 @@ function parseInlineSegs(segs: Seg[]): Inline[] {
  * Entry point
  * ------------------------------------------------------------------ */
 
-/** Parse Markdown/MDX source into an offset-exact {@link Document}. */
-export function parse(src: string): Document {
+/**
+ * Parse Markdown/MDX source into an offset-exact {@link Document}.
+ *
+ * `options` gates the opt-in extensions (math, footnotes, definition lists);
+ * every flag defaults to `false`, so `parse(src)` is unchanged from before.
+ */
+export function parse(src: string, options?: ParseOptions): Document {
+  opts = {
+    math: options?.math === true,
+    footnotes: options?.footnotes === true,
+    defLists: options?.defLists === true,
+  };
   const lines = splitLines(src);
   const children = parseBlocks(lines);
   return { type: 'document', from: 0, to: src.length, children };
+}
+
+/* ------------------------------------------------------------------ *
+ * Incremental reparse
+ *
+ * `parseIncremental` returns a document DEEP-EQUAL to `parse(nextSrc, options)`
+ * but computed by reusing the leading top-level blocks of a previous parse that
+ * the edit provably cannot have touched, then reparsing from the first safe block
+ * boundary at/before the edit through to the end of `nextSrc`.
+ *
+ * Correctness rests on one invariant: every reused block's parse depends only on
+ * the source PREFIX before the reparse cut, and that prefix is byte-identical in
+ * `prevSrc` and `nextSrc` (the edit is entirely at/after the cut). Whenever a safe
+ * cut cannot be cheaply proven, we fall back to a full `parse` — a correct result
+ * is never sacrificed for a fast one.
+ *
+ * When possible the reparse is ALSO bounded on the RIGHT: rather than reparsing
+ * from the cut to end-of-document, we reparse only the dirty block(s) plus a safe
+ * look-around, then reuse the unchanged SUFFIX blocks from `prev`, re-offset by the
+ * edit's length delta. That suffix reuse is only taken when a clean, self-terminated
+ * dirty-region boundary can be PROVEN by a small bounded reparse that includes the
+ * join line (an open fence / list / etc. that would bleed past the join makes the
+ * proof fail, and we fall back to the reparse-to-EOF path — still correct, just less
+ * tight). A small edit near the TOP of a large document therefore reparses a bounded
+ * region instead of the whole tail. The one-way property test in
+ * `parser.incremental.test.ts` is the oracle that enforces the deep-equality.
+ * ------------------------------------------------------------------ */
+
+/** Instrumentation about what an incremental reparse reused vs rebuilt. */
+export interface IncrementalStats {
+  /** True when the fast path bailed and a full {@link parse} produced the result. */
+  fellBack: boolean;
+  /** Count of leading top-level blocks reused verbatim from the previous document. */
+  reusedBlocks: number;
+  /** Line index in `nextSrc` from which blocks were reparsed (0 ⇒ whole document). */
+  reparsedFromLine: number;
+  /**
+   * Line index in `nextSrc` at which the reparsed region ENDS (exclusive). Equals
+   * {@link totalLines} when the reparse ran to end-of-document (no suffix reuse); a
+   * value `< totalLines` means the tail was bounded and trailing blocks were reused.
+   */
+  reparsedToLine: number;
+  /** Count of trailing top-level blocks reused from `prev` (re-offset by the edit delta). */
+  reusedSuffixBlocks: number;
+  /** Total number of content lines in `nextSrc`. */
+  totalLines: number;
+}
+
+/** The document plus {@link IncrementalStats} from {@link parseIncrementalWithStats}. */
+export interface IncrementalResult {
+  doc: Document;
+  stats: IncrementalStats;
+}
+
+type HeadSafety = 'always' | 'needs-blank' | 'never';
+
+/**
+ * How safe it is to keep `block` as the LAST block of the reused prefix — i.e.
+ * whether, once the source AFTER it changes, `block`'s parse could grow past the
+ * cut and swallow the new content.
+ *
+ *  - `always`      self-delimiting or single-line: its extent never depends on
+ *                  what follows (heading, thematic break, or a *closed* fenced /
+ *                  `$$` block — an unclosed one runs to EOF and so is never an
+ *                  interior block).
+ *  - `needs-blank` terminates only at a blank line: safe **iff** a blank line
+ *                  sits between it and the cut. That blank, being before the edit,
+ *                  is preserved in `nextSrc`, so no edit can un-terminate it.
+ *  - `never`       lazily continues across blank lines by indentation, so a later
+ *                  edit could indent a following line into it — indented code,
+ *                  lists, footnote definitions and definition lists.
+ */
+function headSafety(block: Block): HeadSafety {
+  switch (block.type) {
+    case 'heading':
+    case 'thematicBreak':
+    case 'mathBlock':
+      return 'always';
+    case 'codeBlock':
+      return block.fenced ? 'always' : 'never';
+    case 'paragraph':
+    case 'table':
+    case 'htmlBlock':
+    case 'blockquote':
+      return 'needs-blank';
+    default:
+      // list, footnoteDef, defList — loose/lazy continuation across blanks.
+      return 'never';
+  }
+}
+
+/** Is the source line ending just before `lineStart` (itself a line start) blank? */
+function prevLineIsBlank(src: string, lineStart: number): boolean {
+  if (lineStart <= 0) return false;
+  // `lineStart` is a line start ⇒ `src[lineStart - 1]` is the '\n' ending the
+  // previous line. Walk back to that line's own start and test it for blankness.
+  const end = lineStart - 1;
+  let start = end - 1;
+  while (start >= 0 && src[start] !== '\n') start--;
+  start += 1;
+  return src.slice(start, end).trim() === '';
+}
+
+/**
+ * Like {@link prevLineIsBlank}, but ALSO requires the blank line to lie entirely at
+ * or after `minStart` — i.e. wholly inside the source region the edit did not touch.
+ * Used to prove a suffix-join boundary sits behind an unchanged blank separator, so
+ * no construct can lazily bridge the reparsed dirty region into the reused suffix.
+ */
+function blankLineFullyAfter(src: string, lineStart: number, minStart: number): boolean {
+  if (lineStart <= 0) return false;
+  const end = lineStart - 1; // the '\n' that terminated the previous line
+  let start = end - 1;
+  while (start >= 0 && src[start] !== '\n') start--;
+  start += 1;
+  if (start < minStart) return false; // blank line straddles / precedes the edit
+  return src.slice(start, end).trim() === '';
+}
+
+/**
+ * Deep-clone a block, shifting every `from`/`to` (and `contentFrom`, where present)
+ * by `delta`. Used to re-offset an unchanged SUFFIX block reused from `prev` into
+ * `nextSrc` coordinates without reparsing it. Walks the WHOLE subtree (nested
+ * blocks, inline children, table cells, list/def items) via the shared {@link walk},
+ * so no offset-bearing node is missed. `prev` is never mutated.
+ */
+function shiftBlock(block: Block, delta: number): Block {
+  const clone = structuredClone(block) as Block;
+  walk(clone as AstNode, (n) => {
+    const p = n as { from: number; to: number; contentFrom?: number };
+    p.from += delta;
+    p.to += delta;
+    if (typeof p.contentFrom === 'number') p.contentFrom += delta;
+  });
+  return clone;
+}
+
+/** Index of the line in `lines` that begins exactly at offset `off`, or -1. */
+function lineStartingAt(lines: Line[], off: number): number {
+  let lo = 0;
+  let hi = lines.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const f = lines[mid]!.from;
+    if (f === off) return mid;
+    if (f < off) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return -1;
+}
+
+/** Largest index `k` with `blocks[k].from <= off` (blocks are offset-ordered), or -1. */
+function lastBlockAtOrBefore(blocks: Block[], off: number): number {
+  let lo = 0;
+  let hi = blocks.length - 1;
+  let ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (blocks[mid]!.from <= off) {
+      ans = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return ans;
+}
+
+/** A proven bounded reparse: the freshly parsed dirty blocks + the reused, re-offset suffix. */
+interface SuffixReuse {
+  /** Freshly parsed dirty blocks, already carrying absolute `nextSrc` offsets. */
+  dirty: Block[];
+  /** Trailing blocks reused from `prev`, re-offset by the edit delta. */
+  shifted: Block[];
+  /** Line index in `nextSrc` at which the reparsed dirty region ends (exclusive). */
+  endLine: number;
+  /** Count of reused suffix blocks. */
+  count: number;
+}
+
+/** Cap on how many join candidates we probe before giving up (bounds worst-case cost). */
+const MAX_JOIN_ATTEMPTS = 4;
+
+/**
+ * Try to bound the reparse on the RIGHT so a small edit near the top of a large doc
+ * does not reparse the whole tail. Given the prefix cut (`cLine`/`k` already chosen),
+ * find a prev block boundary AFTER the change whose reuse can be PROVEN sound, reparse
+ * only `[cLine, joinLine)`, and reuse the trailing prev blocks re-offset by `delta`.
+ *
+ * Correctness rests on three facts:
+ *  1. Suffix content is byte-identical (shifted by `delta`) — guaranteed by only
+ *     considering join offsets `>= to` (everything at/after the edit is unchanged).
+ *  2. `parseBlocks` is strictly left-to-right, so the reused suffix `blocks[j..]`
+ *     equals `parseBlocks(nextLines.slice(joinLine))` shifted — *provided* a real
+ *     block boundary exists at the join in the full parse of `nextSrc`.
+ *  3. That boundary is PROVEN by a bounded reparse that includes the join line: if
+ *     a block starts exactly at the join offset, no open construct (fence, list,
+ *     indented code, …) from the dirty region bled across it. If the proof fails we
+ *     return `null` and the caller falls back to reparse-to-EOF (still correct).
+ * `opts` must already be set for `parseBlocks`.
+ */
+function tryReuseSuffix(
+  blocks: Block[],
+  prevSrc: string,
+  to: number,
+  delta: number,
+  nextLines: Line[],
+  cLine: number,
+): SuffixReuse | null {
+  // Last prev block starting at/before the change end — the dirty region covers it;
+  // the first reuse candidate is the block after it.
+  const dEnd = lastBlockAtOrBefore(blocks, to);
+  let attempts = 0;
+  for (let j = dEnd + 1; j < blocks.length; j++) {
+    const joinOff = blocks[j]!.from;
+    if (joinOff < to) continue; // suffix must be entirely in the unchanged region
+    // A blank line wholly inside the unchanged region must precede the join, so no
+    // lazily-continuing construct can bridge the dirty region into the suffix.
+    if (!blankLineFullyAfter(prevSrc, joinOff, to)) continue;
+    const nextJoinOff = joinOff + delta;
+    const joinLine = lineStartingAt(nextLines, nextJoinOff);
+    if (joinLine <= cLine) continue; // must reparse a non-empty region below the cut
+
+    if (++attempts > MAX_JOIN_ATTEMPTS) break; // bound the probing cost, then fall back
+
+    // Bounded, boundary-proving reparse: include the join line. A block starting
+    // exactly at `nextJoinOff` proves the dirty region self-terminates there.
+    const guard = parseBlocks(nextLines.slice(cLine, joinLine + 1));
+    const dirty: Block[] = [];
+    let proven = false;
+    for (const b of guard) {
+      if (b.from === nextJoinOff) {
+        proven = true;
+        break;
+      }
+      if (b.from > nextJoinOff) break; // overshot ⇒ no clean boundary here
+      dirty.push(b);
+    }
+    if (!proven) continue; // an open construct crossed the join — try the next candidate
+
+    const rest = blocks.slice(j);
+    // Always clone the reused suffix — even at `delta === 0`. Returning `prev`'s
+    // own block objects would alias subtrees between the old and new documents;
+    // `shiftBlock(b, 0)` is a pure structuredClone (no-op offset shift), so the
+    // returned tree never shares node identity with `prev`. (Insertions already
+    // pay this clone; a same-length edit is no different.)
+    const shifted = rest.map((b) => shiftBlock(b, delta));
+    return { dirty, shifted, endLine: joinLine, count: rest.length };
+  }
+  return null;
+}
+
+function runIncremental(
+  prev: Document,
+  prevSrc: string,
+  change: Change,
+  nextSrc: string,
+  options: ParseOptions | undefined,
+): IncrementalResult {
+  const nextLines = splitLines(nextSrc);
+  const total = nextLines.length;
+  const full = (): IncrementalResult => ({
+    doc: parse(nextSrc, options),
+    stats: {
+      fellBack: true,
+      reusedBlocks: 0,
+      reparsedFromLine: 0,
+      reparsedToLine: total,
+      reusedSuffixBlocks: 0,
+      totalLines: total,
+    },
+  });
+
+  // Normalize + validate the change against prevSrc. A malformed or inconsistent
+  // change is never trusted — a correct full parse is always the safe answer.
+  const from = Math.max(0, Math.min(change.from, change.to));
+  const to = Math.min(prevSrc.length, Math.max(change.from, change.to));
+  if (to < from) return full();
+  if (nextSrc.length !== prevSrc.length + change.insert.length - (to - from)) return full();
+  // Every candidate cut satisfies `cut <= from`, so a single check that the
+  // prefix `[0, from)` is byte-identical proves every reused prefix identical.
+  if (prevSrc.slice(0, from) !== nextSrc.slice(0, from)) return full();
+
+  // Offset shift applied to any source position at/after the edit end `to`.
+  const delta = change.insert.length - (to - from);
+
+  const blocks = prev.children;
+  const hi = Math.min(blocks.length - 1, lastBlockAtOrBefore(blocks, from));
+  for (let k = hi; k >= 1; k--) {
+    const cut = blocks[k]!.from; // reuse blocks[0..k-1]; reparse from `cut`
+    if (cut > from) continue; // head must lie entirely before the edit
+    const safety = headSafety(blocks[k - 1]!);
+    if (safety === 'never') continue;
+    if (safety === 'needs-blank' && !prevLineIsBlank(prevSrc, cut)) continue;
+    const c = lineStartingAt(nextLines, cut);
+    if (c < 0) continue; // `cut` is not a line start in nextSrc (should not happen)
+
+    // The reparse runs `parseBlocks`, which reads the module-scoped `opts`; set
+    // them from `options` so the reparsed region matches a full parse exactly.
+    opts = {
+      math: options?.math === true,
+      footnotes: options?.footnotes === true,
+      defLists: options?.defLists === true,
+    };
+
+    // Try to bound the reparse on the right and reuse the unchanged suffix; this
+    // is what makes a top-of-doc edit cheap. If no clean boundary can be proven,
+    // fall back to reparsing the whole tail (still correct, just not as tight).
+    const suffix = tryReuseSuffix(blocks, prevSrc, to, delta, nextLines, c);
+    if (suffix) {
+      const children = blocks.slice(0, k).concat(suffix.dirty, suffix.shifted);
+      return {
+        doc: { type: 'document', from: 0, to: nextSrc.length, children },
+        stats: {
+          fellBack: false,
+          reusedBlocks: k,
+          reparsedFromLine: c,
+          reparsedToLine: suffix.endLine,
+          reusedSuffixBlocks: suffix.count,
+          totalLines: total,
+        },
+      };
+    }
+
+    const tail = parseBlocks(nextLines.slice(c));
+    const children = blocks.slice(0, k).concat(tail);
+    return {
+      doc: { type: 'document', from: 0, to: nextSrc.length, children },
+      stats: {
+        fellBack: false,
+        reusedBlocks: k,
+        reparsedFromLine: c,
+        reparsedToLine: total,
+        reusedSuffixBlocks: 0,
+        totalLines: total,
+      },
+    };
+  }
+  return full();
+}
+
+/**
+ * Incrementally reparse `prev` (the parse of `prevSrc`) after a single
+ * {@link Change} produced `nextSrc`. The result is deep-equal to
+ * `parse(nextSrc, options)`; pass the SAME `options` that produced `prev`.
+ */
+export function parseIncremental(
+  prev: Document,
+  prevSrc: string,
+  change: Change,
+  nextSrc: string,
+  options?: ParseOptions,
+): Document {
+  return runIncremental(prev, prevSrc, change, nextSrc, options).doc;
+}
+
+/** {@link parseIncremental} plus {@link IncrementalStats} about what was reused. */
+export function parseIncrementalWithStats(
+  prev: Document,
+  prevSrc: string,
+  change: Change,
+  nextSrc: string,
+  options?: ParseOptions,
+): IncrementalResult {
+  return runIncremental(prev, prevSrc, change, nextSrc, options);
 }

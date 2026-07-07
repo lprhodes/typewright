@@ -21,13 +21,29 @@ export interface StreamingPreviewProps {
   stream?: AsyncIterable<string> | ReadableStream<string>;
   /** Which incomplete constructs to optimistically render. */
   anticipate?: boolean | AnticipationOptions;
+  /**
+   * Reveal characters smoothly rather than in raw chunk jumps (only affects the
+   * `stream` path — the controlled `text` prop is the host's to pace). `true`
+   * uses a default rate; `{ charsPerSecond }` sets it. Mirrors `StreamOptions.smooth`.
+   */
+  smooth?: boolean | { charsPerSecond: number };
+  /** Label shown inside the skeleton of a component whose props are still streaming. */
+  componentFallback?: string;
   className?: string;
   style?: React.CSSProperties;
 }
 
 export function StreamingPreview(props: StreamingPreviewProps): React.ReactElement {
   useInjectStyles();
-  const { text: controlledText, stream, anticipate: ant = true, className, style } = props;
+  const {
+    text: controlledText,
+    stream,
+    anticipate: ant = true,
+    smooth,
+    componentFallback,
+    className,
+    style,
+  } = props;
   const [streamed, setStreamed] = React.useState('');
   const value = controlledText !== undefined ? controlledText : streamed;
   const containerRef = React.useRef<HTMLDivElement>(null);
@@ -36,16 +52,20 @@ export function StreamingPreview(props: StreamingPreviewProps): React.ReactEleme
     if (!stream) return;
     let cancelled = false;
     setStreamed('');
-    const controller = createStreamController((t) => {
-      if (!cancelled) setStreamed(t);
-    });
+    const controller = createStreamController(
+      (t) => {
+        if (!cancelled) setStreamed(t);
+      },
+      { smooth },
+    );
     void pipeStream(stream, controller).catch(() => {
       /* stream errored — keep what we have */
     });
     return () => {
       cancelled = true;
+      controller.reset(); // clear any pending reveal timer on unmount/re-subscribe
     };
-  }, [stream]);
+  }, [stream, smooth]);
 
   // Reconcile the anticipated HTML into the container block-by-block.
   React.useEffect(() => {
@@ -57,7 +77,7 @@ export function StreamingPreview(props: StreamingPreviewProps): React.ReactEleme
       return;
     }
 
-    const { html } = anticipate(value, ant);
+    const { html } = anticipate(value, ant, componentFallback);
     const tmp = document.createElement('div');
     tmp.innerHTML = html; // sanitized by render.ts + class-only pending markup
     const next = Array.from(tmp.children) as HTMLElement[];
@@ -83,7 +103,7 @@ export function StreamingPreview(props: StreamingPreviewProps): React.ReactEleme
       }
     }
     while (container.children.length > next.length) container.lastElementChild?.remove();
-  }, [value, ant]);
+  }, [value, ant, componentFallback]);
 
   const cls = ['tw-editor', 'tw-streaming', className].filter(Boolean).join(' ');
   return <div ref={containerRef} className={cls} style={style} data-typewright="streaming" />;

@@ -17,16 +17,30 @@ import type {
 export * from '../types';
 
 /* Headless engine surface — parser, renderer, unified-mode, folding, doc model. */
-export { parse } from './parser';
+export { parse, parseIncremental } from './parser';
 export { renderToHtml, renderInline, renderNode, safeUrl } from './render';
+export type { RenderOptions } from './render';
 export { collectMarkers, hiddenMarkers, activeBlockIndex } from './unified';
 export type { Marker } from './unified';
 export { headingFoldRanges } from './fold';
 export type { FoldRange } from './fold';
-export { applyCommand } from './commands';
+export { applyCommand, COMMANDS } from './commands';
 export type { Command, Sel, CommandResult } from './commands';
 export { TextDoc } from './text';
 export type { Change, LineInfo, Position } from './text';
+/* Syntax highlighting (native, zero-dep), comment-anchor + table helpers. */
+export { highlightToHtml } from './highlight';
+export { mapAnchor } from './comments';
+export {
+  cellSourceRange,
+  addRow,
+  addColumn,
+  removeRow,
+  removeColumn,
+  setAlignment,
+} from './table';
+export type { TableEdit } from './table';
+/* ParseOptions and the AST node types are re-exported here too. */
 export * from './ast';
 
 export interface EditorViewOptions extends EditorConfig, EditorEvents {
@@ -35,9 +49,14 @@ export interface EditorViewOptions extends EditorConfig, EditorEvents {
 }
 
 /**
- * The mounted editor. Owns the document string, the incremental parse tree,
- * the decoration set, and the virtualized viewport. React is not required to
- * use this class — the React component in `typewright` is a thin wrapper over it.
+ * PRE-ALPHA SCAFFOLD — not yet implemented. Constructing an `EditorView`
+ * throws: the stateful mounted engine (document string, incremental parse tree,
+ * decoration set, virtualized viewport) described in SPEC.md is still to come.
+ * This class only reserves the eventual public surface.
+ *
+ * To edit or render Markdown today, use the functional headless API exported
+ * from this module — {@link parse}, {@link parseIncremental}, {@link renderToHtml} —
+ * or the React `TypewrightEditor` component in `typewright`.
  */
 export class EditorView {
   readonly dom: HTMLElement;

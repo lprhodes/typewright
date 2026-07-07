@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { parse } from './parser';
 import { collectMarkers, hiddenMarkers, activeBlockIndex } from './unified';
 import type { Marker } from './unified';
+import type { Document } from './ast';
 
 const kinds = (markers: Marker[]): string[] => markers.map((m) => m.kind);
 const ofKind = (markers: Marker[], kind: string): Marker[] =>
@@ -100,6 +101,240 @@ describe('collectMarkers', () => {
     expect(() => collectMarkers(parse('[broken](  '))).not.toThrow();
     expect(() => collectMarkers(parse(''))).not.toThrow();
     expect(() => collectMarkers(parse('###'))).not.toThrow();
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Math + footnote-ref markers (Wave 2b). Built from direct AST fixtures so the
+ * offsets are exact and independent of the parser's opt-in extension flags.
+ * ------------------------------------------------------------------ */
+
+describe('collectMarkers — math + footnote refs', () => {
+  it('emits two `$` delimiter markers around inline math', () => {
+    // `$e=mc^2$` — [0,8): '$' at [0,1), source [1,7), '$' at [7,8).
+    const doc: Document = {
+      type: 'document',
+      from: 0,
+      to: 8,
+      children: [
+        {
+          type: 'paragraph',
+          from: 0,
+          to: 8,
+          children: [{ type: 'math', from: 0, to: 8, value: 'e=mc^2', display: false }],
+        },
+      ],
+    };
+    const math = ofKind(collectMarkers(doc), 'math');
+    expect(math).toHaveLength(2);
+    expect(math[0]!.from).toBe(0);
+    expect(math[0]!.to).toBe(1);
+    expect(math[1]!.from).toBe(7);
+    expect(math[1]!.to).toBe(8);
+  });
+
+  it('emits two `$$` delimiter markers around display math', () => {
+    // `$$x$$` — [0,5): '$$' at [0,2), source [2,3), '$$' at [3,5).
+    const doc: Document = {
+      type: 'document',
+      from: 0,
+      to: 5,
+      children: [
+        {
+          type: 'paragraph',
+          from: 0,
+          to: 5,
+          children: [{ type: 'math', from: 0, to: 5, value: 'x', display: true }],
+        },
+      ],
+    };
+    const math = ofKind(collectMarkers(doc), 'math');
+    expect(math).toHaveLength(2);
+    expect(math[0]!.from).toBe(0);
+    expect(math[0]!.to).toBe(2);
+    expect(math[1]!.from).toBe(3);
+    expect(math[1]!.to).toBe(5);
+  });
+
+  it('emits `[^` and `]` markers for a footnote reference', () => {
+    // `[^1]` — [0,4): '[^' at [0,2), id '1' at [2,3), ']' at [3,4).
+    const doc: Document = {
+      type: 'document',
+      from: 0,
+      to: 4,
+      children: [
+        {
+          type: 'paragraph',
+          from: 0,
+          to: 4,
+          children: [{ type: 'footnoteRef', from: 0, to: 4, id: '1' }],
+        },
+      ],
+    };
+    const fn = ofKind(collectMarkers(doc), 'footnoteRef');
+    expect(fn).toHaveLength(2);
+    expect(fn[0]!.from).toBe(0);
+    expect(fn[0]!.to).toBe(2);
+    expect(fn[1]!.from).toBe(3);
+    expect(fn[1]!.to).toBe(4);
+  });
+
+  it('reveals only the math delimiter the caret sits on', () => {
+    const doc: Document = {
+      type: 'document',
+      from: 0,
+      to: 8,
+      children: [
+        {
+          type: 'paragraph',
+          from: 0,
+          to: 8,
+          children: [{ type: 'math', from: 0, to: 8, value: 'e=mc^2', display: false }],
+        },
+      ],
+    };
+    const math = ofKind(collectMarkers(doc), 'math');
+    const open = math[0]!; // [0,1)
+    const close = math[1]!; // [7,8)
+    // caret on the opening '$' reveals it; the far closing '$' stays hidden
+    const hidden = hiddenMarkers(doc, { from: 0, to: 0 });
+    expect(hidden).not.toContainEqual(open);
+    expect(hidden).toContainEqual(close);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Fenced-code + blockquote markers (TW-0003). These need the raw `source`
+ * to be offset-exact, so they are only emitted when `source` is passed.
+ * ------------------------------------------------------------------ */
+
+describe('collectMarkers — fenced code + blockquote', () => {
+  it('emits opening + closing fence markers for a closed fenced block', () => {
+    const src = '```js\nconst x = 1;\n```';
+    const fence = ofKind(collectMarkers(parse(src), src), 'fence');
+    expect(fence).toHaveLength(2);
+    // opening fence line: '```js' at [0,5)
+    expect(fence[0]!.from).toBe(0);
+    expect(fence[0]!.to).toBe(5);
+    expect(src.slice(fence[0]!.from, fence[0]!.to)).toBe('```js');
+    // closing fence line: '```' at [19,22)
+    expect(fence[1]!.from).toBe(19);
+    expect(fence[1]!.to).toBe(22);
+    expect(src.slice(fence[1]!.from, fence[1]!.to)).toBe('```');
+  });
+
+  it('works for tilde fences too', () => {
+    const src = '~~~\ncode\n~~~';
+    const fence = ofKind(collectMarkers(parse(src), src), 'fence');
+    expect(fence).toHaveLength(2);
+    expect([fence[0]!.from, fence[0]!.to]).toEqual([0, 3]);
+    expect([fence[1]!.from, fence[1]!.to]).toEqual([9, 12]);
+  });
+
+  it('includes any info-string / trailing spaces in the fence lines', () => {
+    const src = '```js  \nx\n```  ';
+    const fence = ofKind(collectMarkers(parse(src), src), 'fence');
+    expect(fence).toHaveLength(2);
+    expect(src.slice(fence[0]!.from, fence[0]!.to)).toBe('```js  ');
+    expect(src.slice(fence[1]!.from, fence[1]!.to)).toBe('```  ');
+  });
+
+  it('emits only the opening fence for an unterminated fenced block', () => {
+    const src = '```js\nno close here';
+    const fence = ofKind(collectMarkers(parse(src), src), 'fence');
+    expect(fence).toHaveLength(1);
+    expect(src.slice(fence[0]!.from, fence[0]!.to)).toBe('```js');
+  });
+
+  it('emits no fence markers for an indented (non-fenced) code block', () => {
+    const src = '    indented code';
+    expect(ofKind(collectMarkers(parse(src), src), 'fence')).toHaveLength(0);
+  });
+
+  it('emits a `>` marker for a single blockquote line', () => {
+    const src = '> hello';
+    const bq = ofKind(collectMarkers(parse(src), src), 'blockquote');
+    expect(bq).toHaveLength(1);
+    expect([bq[0]!.from, bq[0]!.to]).toEqual([0, 2]);
+    expect(src.slice(bq[0]!.from, bq[0]!.to)).toBe('> ');
+  });
+
+  it('emits one `>` marker per line for a multi-line blockquote', () => {
+    const src = '> a\n> b';
+    const bq = ofKind(collectMarkers(parse(src), src), 'blockquote');
+    expect(bq).toHaveLength(2);
+    expect([bq[0]!.from, bq[0]!.to]).toEqual([0, 2]);
+    expect([bq[1]!.from, bq[1]!.to]).toEqual([4, 6]);
+  });
+
+  it('covers the full stacked prefix for a nested blockquote (one marker/line)', () => {
+    const src = '> > deep\n> > deeper';
+    const bq = ofKind(collectMarkers(parse(src), src), 'blockquote');
+    expect(bq).toHaveLength(2);
+    expect(src.slice(bq[0]!.from, bq[0]!.to)).toBe('> > ');
+    expect(src.slice(bq[1]!.from, bq[1]!.to)).toBe('> > ');
+  });
+
+  it('handles a `>` with no following space', () => {
+    const src = '>tight';
+    const bq = ofKind(collectMarkers(parse(src), src), 'blockquote');
+    expect(bq).toHaveLength(1);
+    expect([bq[0]!.from, bq[0]!.to]).toEqual([0, 1]);
+  });
+
+  it('omits fence/blockquote markers when `source` is not supplied', () => {
+    const src = '```js\nx\n```\n\n> quote';
+    const withSource = kinds(collectMarkers(parse(src), src));
+    const withoutSource = kinds(collectMarkers(parse(src)));
+    expect(withSource).toContain('fence');
+    expect(withSource).toContain('blockquote');
+    // source-free call is identical to the pre-TW-0003 behaviour
+    expect(withoutSource).not.toContain('fence');
+    expect(withoutSource).not.toContain('blockquote');
+  });
+
+  it('still collects the inline markers inside a blockquote', () => {
+    const src = '> quote **bold**';
+    const all = collectMarkers(parse(src), src);
+    expect(kinds(all)).toContain('blockquote');
+    expect(ofKind(all, 'strong')).toHaveLength(2);
+  });
+});
+
+describe('hiddenMarkers — fence + blockquote reveal', () => {
+  const fenceSrc = '```js\nx\n```'; // open [0,5), close [8,11)
+
+  it('hides both fence markers when the caret is in the code body', () => {
+    const doc = parse(fenceSrc);
+    const hidden = ofKind(hiddenMarkers(doc, { from: 6, to: 6 }, fenceSrc), 'fence');
+    expect(hidden).toHaveLength(2);
+  });
+
+  it('reveals only the fence line the caret sits on', () => {
+    const doc = parse(fenceSrc);
+    const fence = ofKind(collectMarkers(doc, fenceSrc), 'fence');
+    const open = fence[0]!; // [0,5)
+    const close = fence[1]!; // [8,11)
+    // caret on the opening fence reveals it, the closing fence stays hidden
+    const hiddenOnOpen = hiddenMarkers(doc, { from: 2, to: 2 }, fenceSrc);
+    expect(hiddenOnOpen).not.toContainEqual(open);
+    expect(hiddenOnOpen).toContainEqual(close);
+    // caret on the closing fence reveals it, the opening fence stays hidden
+    const hiddenOnClose = hiddenMarkers(doc, { from: 9, to: 9 }, fenceSrc);
+    expect(hiddenOnClose).toContainEqual(open);
+    expect(hiddenOnClose).not.toContainEqual(close);
+  });
+
+  it('hides the `>` prefix when the caret is in the quote body, reveals it on the marker', () => {
+    const src = '> hello world';
+    const doc = parse(src);
+    const marker = ofKind(collectMarkers(doc, src), 'blockquote')[0]!; // [0,2)
+    // caret out in 'world' → the '>' prefix stays hidden
+    const away = hiddenMarkers(doc, { from: 8, to: 8 }, src);
+    expect(away).toContainEqual(marker);
+    // caret on the '>' → it reveals
+    const on = hiddenMarkers(doc, { from: 0, to: 0 }, src);
+    expect(on).not.toContainEqual(marker);
   });
 });
 

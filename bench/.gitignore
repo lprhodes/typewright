@@ -1,0 +1,3 @@
+# The 1 MB fixture is deterministically regenerable — don't bloat the repo.
+#   node --experimental-strip-types bench/fixtures/generate.ts
+fixtures/large.md

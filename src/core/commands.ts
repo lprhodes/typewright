@@ -14,6 +14,9 @@ export type Command =
   | 'heading1'
   | 'heading2'
   | 'heading3'
+  | 'heading4'
+  | 'heading5'
+  | 'heading6'
   | 'bulletList'
   | 'orderedList'
   | 'taskList'
@@ -21,6 +24,42 @@ export type Command =
   | 'horizontalRule'
   | 'codeBlock'
   | 'table';
+
+/** Metadata describing a command for enumerable surfaces (toolbar, palette, keymap). */
+export interface CommandMeta {
+  id: Command;
+  label: string;
+  /** Display shortcut (e.g. `⌘B`) when one is bound; omitted otherwise. */
+  kbd?: string;
+  group: 'inline' | 'block' | 'insert';
+}
+
+/**
+ * The single source of truth enumerating every command — consumed by the
+ * formatting toolbar, the command palette, and the keymap. Plain data, no side
+ * effects; one entry per `Command` id (kept exhaustive by the `applyCommand`
+ * `never` guard, which forces new ids to exist before they can be listed here).
+ */
+export const COMMANDS: readonly CommandMeta[] = [
+  { id: 'bold', label: 'Bold', kbd: '⌘B', group: 'inline' },
+  { id: 'italic', label: 'Italic', kbd: '⌘I', group: 'inline' },
+  { id: 'strikethrough', label: 'Strikethrough', group: 'inline' },
+  { id: 'inlineCode', label: 'Inline Code', kbd: '⌘E', group: 'inline' },
+  { id: 'link', label: 'Link', kbd: '⌘K', group: 'inline' },
+  { id: 'heading1', label: 'Heading 1', group: 'block' },
+  { id: 'heading2', label: 'Heading 2', group: 'block' },
+  { id: 'heading3', label: 'Heading 3', group: 'block' },
+  { id: 'heading4', label: 'Heading 4', group: 'block' },
+  { id: 'heading5', label: 'Heading 5', group: 'block' },
+  { id: 'heading6', label: 'Heading 6', group: 'block' },
+  { id: 'bulletList', label: 'Bullet List', group: 'block' },
+  { id: 'orderedList', label: 'Ordered List', group: 'block' },
+  { id: 'taskList', label: 'Task List', group: 'block' },
+  { id: 'quote', label: 'Quote', group: 'block' },
+  { id: 'horizontalRule', label: 'Horizontal Rule', group: 'insert' },
+  { id: 'codeBlock', label: 'Code Block', group: 'insert' },
+  { id: 'table', label: 'Table', group: 'insert' },
+];
 
 export interface Sel {
   from: number;
@@ -131,8 +170,22 @@ export function applyCommand(text: string, sel: Sel, cmd: Command): CommandResul
       return insertLink(text, sel);
     case 'heading1':
     case 'heading2':
-    case 'heading3': {
-      const level = cmd === 'heading1' ? 1 : cmd === 'heading2' ? 2 : 3;
+    case 'heading3':
+    case 'heading4':
+    case 'heading5':
+    case 'heading6': {
+      const level =
+        cmd === 'heading1'
+          ? 1
+          : cmd === 'heading2'
+            ? 2
+            : cmd === 'heading3'
+              ? 3
+              : cmd === 'heading4'
+                ? 4
+                : cmd === 'heading5'
+                  ? 5
+                  : 6;
       const marker = '#'.repeat(level) + ' ';
       return applyLinePrefix(text, sel, {
         has: (l) => new RegExp(`^ {0,3}#{${level}}\\s`).test(l),

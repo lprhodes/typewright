@@ -75,6 +75,22 @@ export interface LineBreak extends Pos {
   hard: boolean;
 }
 
+/** Inline math (`$…$` inline, `$$…$$` inline-display). Opt-in via {@link ParseOptions.math}. */
+export interface Math extends Pos {
+  type: 'math';
+  /** The TeX source between the delimiters (delimiters excluded). */
+  value: string;
+  /** `true` for a `$$…$$` display span, `false` for a `$…$` inline span. */
+  display: boolean;
+}
+
+/** A footnote reference `[^id]`. Opt-in via {@link ParseOptions.footnotes}. */
+export interface FootnoteRef extends Pos {
+  type: 'footnoteRef';
+  /** The referenced footnote label (between `[^` and `]`). */
+  id: string;
+}
+
 export type Inline =
   | TextNode
   | Emphasis
@@ -84,7 +100,9 @@ export type Inline =
   | Link
   | Image
   | Autolink
-  | LineBreak;
+  | LineBreak
+  | Math
+  | FootnoteRef;
 
 /* ------------------------------------------------------------------ *
  * Block nodes
@@ -163,6 +181,35 @@ export interface HtmlBlock extends Pos {
   variant: 'html' | 'mdxFlow';
 }
 
+/** A `$$…$$` display-math block. Opt-in via {@link ParseOptions.math}. */
+export interface MathBlock extends Pos {
+  type: 'mathBlock';
+  /** The TeX source between the `$$` fences (fences excluded). */
+  value: string;
+}
+
+/** A footnote definition `[^id]: …`. Opt-in via {@link ParseOptions.footnotes}. */
+export interface FootnoteDef extends Pos {
+  type: 'footnoteDef';
+  /** The footnote label (between `[^` and `]`). */
+  id: string;
+  children: Block[];
+}
+
+/** A single term + one-or-more definitions inside a {@link DefList}. */
+export interface DefItem extends Pos {
+  type: 'defItem';
+  term: Inline[];
+  /** Each `: …` definition, parsed as its own block sequence. */
+  definitions: Block[][];
+}
+
+/** A definition list — terms with `: …` definitions. Opt-in via {@link ParseOptions.defLists}. */
+export interface DefList extends Pos {
+  type: 'defList';
+  items: DefItem[];
+}
+
 export type Block =
   | Heading
   | Paragraph
@@ -171,14 +218,32 @@ export type Block =
   | CodeBlock
   | ThematicBreak
   | Table
-  | HtmlBlock;
+  | HtmlBlock
+  | MathBlock
+  | FootnoteDef
+  | DefList;
 
 export interface Document extends Pos {
   type: 'document';
   children: Block[];
 }
 
-export type AstNode = Document | Block | ListItem | TableCell | Inline;
+export type AstNode = Document | Block | ListItem | TableCell | DefItem | Inline;
+
+/**
+ * Opt-in parser extensions. Every flag defaults to `false`, so `parse(src)`
+ * behaves exactly as it always has; enabling a flag lights up the matching
+ * construct (and nothing else). Kept semver-safe so a later wave can turn these
+ * on from configuration without a breaking parser change.
+ */
+export interface ParseOptions {
+  /** Parse `$…$` inline and `$$…$$` block math. */
+  math?: boolean;
+  /** Parse `[^id]` footnote references and `[^id]: …` definitions. */
+  footnotes?: boolean;
+  /** Parse `term` / `: definition` definition lists. */
+  defLists?: boolean;
+}
 
 /* ------------------------------------------------------------------ *
  * Helpers
@@ -194,6 +259,8 @@ const INLINE_TYPES = new Set([
   'image',
   'autolink',
   'break',
+  'math',
+  'footnoteRef',
 ]);
 
 export function isInline(node: AstNode): node is Inline {
@@ -230,6 +297,12 @@ export function childrenOf(node: AstNode): AstNode[] {
       return node.children;
     case 'table':
       return [...node.header, ...node.rows.flat()];
+    case 'footnoteDef':
+      return node.children;
+    case 'defList':
+      return node.items;
+    case 'defItem':
+      return [...node.term, ...node.definitions.flat()];
     default:
       return [];
   }
