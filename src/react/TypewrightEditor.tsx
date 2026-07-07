@@ -8,12 +8,16 @@ import type {
   EditorConfig,
   EditorEvents,
   EditorMode,
+  Extensions,
   FoldingOptions,
   KeymapOptions,
   PresencePeer,
+  SettingsOptions,
 } from '../types';
 import { CommentsSidebar, COMMENTS_CSS } from './CommentsSidebar';
 import { FoldMenu, FOLDMENU_CSS } from './FoldMenu';
+import { CommandPalette, SettingsPanel, SETTINGS_CSS } from './SettingsSurface';
+import type { PaletteCommand, SettingsState } from './SettingsSurface';
 import { TableGrid, TABLEGRID_CSS } from './TableGrid';
 
 /** Imperative handle exposed via a ref on `<TypewrightEditor>`. */
@@ -64,9 +68,9 @@ export function useInjectStyles(): void {
     const el = document.createElement('style');
     el.id = STYLE_ID;
     // One injected sheet keyed by STYLE_ID carries the editor chrome plus the
-    // widget-island styles (table grid + fold menu + comments sidebar), so
-    // consumers need no extra CSS.
-    el.textContent = TYPEWRIGHT_CSS + TABLEGRID_CSS + FOLDMENU_CSS + COMMENTS_CSS;
+    // widget-island styles (table grid + fold menu + comments sidebar +
+    // settings panel / command palette), so consumers need no extra CSS.
+    el.textContent = TYPEWRIGHT_CSS + TABLEGRID_CSS + FOLDMENU_CSS + COMMENTS_CSS + SETTINGS_CSS;
     document.head.appendChild(el);
   }, []);
 }
@@ -175,6 +179,13 @@ function normalizeComments(comments: boolean | CommentsOptions | undefined): Com
   if (!comments) return null;
   if (comments === true) return { enabled: true, threads: [] };
   return comments;
+}
+
+/** Normalize `settings` (`boolean | SettingsOptions`) to options-or-null. */
+function normalizeSettings(settings: boolean | SettingsOptions | undefined): SettingsOptions | null {
+  if (!settings) return null;
+  if (settings === true) return { enabled: true };
+  return settings;
 }
 
 /** A single live decoration: where a thread's highlight is drawn *now*. */
@@ -418,6 +429,8 @@ function applyDecorations(
 interface CollabController {
   commentsActive: boolean;
   active: boolean;
+  /** Whether the editor shell + top-right strip render (comments/presence OR settings). */
+  shellActive: boolean;
   /** Whether the comments sidebar is open (content is offset to make room). */
   sidebarOpen: boolean;
   peers: PresencePeer[];
@@ -438,11 +451,16 @@ function useCollab(
   presence: PresencePeer[] | undefined,
   md: string,
   mode: EditorMode,
+  settingsControl?: React.ReactNode,
 ): CollabController {
   const opts = normalizeComments(comments);
   const commentsActive = !!opts && opts.enabled !== false;
   const peers = React.useMemo(() => presence ?? [], [presence]);
   const active = commentsActive || peers.length > 0;
+  // The settings gear shares the top-right control strip, so the shell + strip
+  // also render when only settings is active (with no comments/presence).
+  const settingsPresent = !!settingsControl;
+  const shellActive = active || settingsPresent;
 
   const hostThreads = opts?.threads ?? EMPTY_THREADS;
   const me = opts?.me;
@@ -610,9 +628,9 @@ function useCollab(
     [opts, me],
   );
 
-  const overlay = active ? (
+  const overlay = shellActive ? (
     <>
-      {(peers.length > 0 || commentsActive) && (
+      {(peers.length > 0 || commentsActive || settingsPresent) && (
         <div className="tw-collab-bar">
           {peers.length > 0 && (
             <div className="tw-presence" aria-label="Collaborators">
@@ -643,6 +661,7 @@ function useCollab(
               <span className="tw-comments-toggle-n">{threads.length}</span>
             </button>
           )}
+          {settingsControl}
         </div>
       )}
 
@@ -693,6 +712,7 @@ function useCollab(
   return {
     commentsActive,
     active,
+    shellActive,
     sidebarOpen: open && commentsActive,
     peers,
     threads,
@@ -778,6 +798,7 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
       keymap,
       comments,
       presence,
+      settings,
       readOnly = false,
       placeholder = 'Write Markdown…',
       theme,
@@ -804,12 +825,64 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
       [onModeChange],
     );
 
+    // Settings surface (Phase B3): live, session-only OVERRIDES of the config
+    // props. Each is seeded `undefined`/`{}` so — with no panel interaction — the
+    // effective value below is exactly the prop and existing behaviour is
+    // identical. `mode` already has its own internal state (setMode) above.
+    const settingsOpts = React.useMemo<SettingsOptions | null>(() => normalizeSettings(settings), [settings]);
+    const settingsActive = !!settingsOpts && settingsOpts.enabled !== false;
+    const [toolbarOverride, setToolbarOverride] = React.useState<TypewrightEditorProps['toolbar'] | undefined>(undefined);
+    const [themeOverride, setThemeOverride] = React.useState<'light' | 'dark' | 'auto' | undefined>(undefined);
+    const [foldingOverride, setFoldingOverride] = React.useState<boolean | undefined>(undefined);
+    const [extensionsOverride, setExtensionsOverride] = React.useState<Partial<Extensions>>({});
+    const [settingsOpen, setSettingsOpen] = React.useState(false);
+    const [paletteOpen, setPaletteOpen] = React.useState(false);
+
+    // The gear lives in the shared top-right control strip (alongside the
+    // presence/comments chrome). Built here so it can be threaded into the collab
+    // bar; the panel + palette overlays render at the editor level (below).
+    const settingsControl = settingsActive ? (
+      <button
+        type="button"
+        className={`tw-settings-gear${settingsOpen ? ' tw-on' : ''}`}
+        aria-label={settingsOpen ? 'Hide settings' : 'Show settings'}
+        aria-expanded={settingsOpen}
+        onClick={() => setSettingsOpen((o) => !o)}
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+        </svg>
+      </button>
+    ) : null;
+
+    // ⌘K / Ctrl+K opens the palette. Capture-phase + only when settings is active,
+    // so it beats the ⌘K→link keymap binding and never hijacks otherwise.
+    React.useEffect(() => {
+      if (!settingsActive) return undefined;
+      const onKey = (e: KeyboardEvent) => {
+        if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && (e.key === 'k' || e.key === 'K')) {
+          e.preventDefault();
+          e.stopPropagation();
+          setPaletteOpen(true);
+        }
+      };
+      document.addEventListener('keydown', onKey, true);
+      return () => document.removeEventListener('keydown', onKey, true);
+    }, [settingsActive]);
+
     // Parse: footnotes + conservative def-lists on by default; math only when the
     // extension is on (`$` is common in prose). Render: syntax highlighting when
     // enabled — math stays undefined so the escaped tw-math-src fallback holds.
     // Memoized on the resolved flags so the downstream parse memo stays stable.
-    const mathOn = extEnabled(extensions?.math);
-    const highlightOn = extEnabled(extensions?.syntaxHighlight);
+    // Effective extensions: prop values overlaid with the live settings-panel
+    // overrides (empty by default ⇒ identical to `extensions`).
+    const effExtensions = React.useMemo<Extensions>(
+      () => ({ ...extensions, ...extensionsOverride }),
+      [extensions, extensionsOverride],
+    );
+    const mathOn = extEnabled(effExtensions.math);
+    const highlightOn = extEnabled(effExtensions.syntaxHighlight);
     const parseOpts = React.useMemo<ParseOptions>(
       () => ({ footnotes: true, defLists: true, math: mathOn }),
       [mathOn],
@@ -829,7 +902,7 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
 
     // Collaboration controller (comments + presence). Inert unless the host
     // passes `comments`/`presence`, so default rendering is unchanged.
-    const collab = useCollab(comments, presence, md, mode);
+    const collab = useCollab(comments, presence, md, mode, settingsControl);
     const { onCommit } = collab;
 
     const commitValue = React.useCallback(
@@ -858,13 +931,19 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
     const foldingEnabled = folding === undefined ? true : foldOpts ? foldOpts.enabled !== false : folding !== false;
     const showGutter = foldOpts ? foldOpts.showGutter !== false : true;
     const persistKey = foldOpts ? foldOpts.persistKey : undefined;
-    const appearance = theme?.appearance ?? 'auto';
-    const rootClass = ['tw-editor', `tw-mode-${mode}`, appearance !== 'auto' ? `tw-theme-${appearance}` : '', className]
+
+    // Effective config: prop value unless the settings panel has overridden it, so
+    // a panel toggle re-renders the editor live (override undefined ⇒ prop value).
+    const effFolding = foldingOverride ?? foldingEnabled;
+    const effAppearance = themeOverride ?? (theme?.appearance ?? 'auto');
+    const effToolbar = toolbarOverride ?? toolbar;
+
+    const rootClass = ['tw-editor', `tw-mode-${mode}`, effAppearance !== 'auto' ? `tw-theme-${effAppearance}` : '', className]
       .filter(Boolean)
       .join(' ');
 
-    const toolbarMode: 'docked' | 'floating' = toolbar === 'floating' ? 'floating' : 'docked';
-    const showToolbar = !!toolbar && !readOnly && (mode === 'edit' || mode === 'unified');
+    const toolbarMode: 'docked' | 'floating' = effToolbar === 'floating' ? 'floating' : 'docked';
+    const showToolbar = !!effToolbar && !readOnly && (mode === 'edit' || mode === 'unified');
     const toolbarEl = showToolbar ? <Toolbar mode={toolbarMode} onCommand={applyCmd} /> : null;
 
     // When comments/presence are active, the editor content is wrapped in a
@@ -872,21 +951,73 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
     // bar, and comments sidebar. Inactive → the content renders exactly as before.
     const shellClass = [
       'tw-editor-shell',
-      appearance !== 'auto' ? `tw-theme-${appearance}` : '',
+      effAppearance !== 'auto' ? `tw-theme-${effAppearance}` : '',
       collab.sidebarOpen ? 'tw-comments-open' : '',
     ]
       .filter(Boolean)
       .join(' ');
     const shell = (content: React.ReactElement): React.ReactElement =>
-      collab.active ? (
+      collab.shellActive ? (
         <div className={shellClass} onMouseUp={(e) => collab.onPointer(e.clientX, e.clientY)}>
           {content}
           {collab.overlay}
         </div>
       ) : content;
 
+    // Live settings state fed to the panel, and the patch handler that routes each
+    // key to its override setter (extensions merge shallowly). The panel + palette
+    // are fixed-position overlays rendered alongside every mode's content.
+    const settingsState: SettingsState = {
+      mode,
+      toolbar: effToolbar ?? false,
+      folding: effFolding,
+      theme: effAppearance,
+      extensions: {
+        // gfm is `boolean | Partial<GfmFeatures>` (no `enabled` field): any object
+        // presence counts as on. The rest carry an `enabled` flag → extEnabled.
+        gfm: effExtensions.gfm !== undefined && effExtensions.gfm !== false,
+        mdx: extEnabled(effExtensions.mdx),
+        mermaid: extEnabled(effExtensions.mermaid),
+        math: extEnabled(effExtensions.math),
+        syntaxHighlight: extEnabled(effExtensions.syntaxHighlight),
+      },
+    };
+    const applySettingsPatch = React.useCallback(
+      (patch: Partial<SettingsState>) => {
+        if (patch.mode !== undefined) setMode(patch.mode);
+        if (patch.toolbar !== undefined) setToolbarOverride(patch.toolbar);
+        if (patch.folding !== undefined) setFoldingOverride(patch.folding);
+        if (patch.theme !== undefined) setThemeOverride(patch.theme);
+        if (patch.extensions !== undefined) {
+          setExtensionsOverride((prev) => ({ ...prev, ...patch.extensions }));
+        }
+      },
+      [setMode],
+    );
+    const paletteCommands = React.useMemo<PaletteCommand[]>(() => {
+      const built = COMMANDS.map((c) => ({ id: c.id, label: c.label, kbd: c.kbd, group: c.group, run: () => applyCmd(c.id) }));
+      const host = (settingsOpts?.commands ?? []).map((c) => ({ id: c.id, label: c.label, run: c.run }));
+      return [...built, ...host];
+    }, [applyCmd, settingsOpts]);
+    const settingsSurfaces = settingsActive ? (
+      <>
+        <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} state={settingsState} onChange={applySettingsPatch} />
+        <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={paletteCommands} />
+      </>
+    ) : null;
+    // Wrap a mode's content in the shell, then append the settings overlays.
+    const finish = (content: React.ReactElement): React.ReactElement =>
+      settingsActive ? (
+        <>
+          {shell(content)}
+          {settingsSurfaces}
+        </>
+      ) : (
+        shell(content)
+      );
+
     if (mode === 'edit') {
-      return shell(
+      return finish(
         <div className={rootClass} style={style} data-typewright="edit">
           {toolbarEl}
           <SourceArea
@@ -907,7 +1038,7 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
 
     if (mode === 'read') {
       const html = renderToHtml(parse(md, parseOpts), renderOpts);
-      return shell(
+      return finish(
         <div
           className={rootClass}
           style={style}
@@ -920,7 +1051,7 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
     }
 
     // unified + preview: editable block-level rich preview
-    return shell(
+    return finish(
       <UnifiedEditor
         md={md}
         mdRef={mdRef}
@@ -928,7 +1059,7 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
         style={style}
         readOnly={readOnly}
         placeholder={placeholder}
-        foldingEnabled={foldingEnabled}
+        foldingEnabled={effFolding}
         showGutter={showGutter}
         persistKey={persistKey}
         commitValue={commitValue}
@@ -1651,6 +1782,11 @@ const TYPEWRIGHT_CSS = `
 .tw-comments-toggle:focus-visible{outline:2px solid var(--tw-accent); outline-offset:2px}
 .tw-comments-toggle svg{width:15px; height:15px; flex:none}
 .tw-comments-toggle-n{font-variant-numeric:tabular-nums; font-size:11px; font-weight:640; background:var(--tw-chip); border-radius:999px; padding:0 6px; line-height:1.6}
+.tw-settings-gear{display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; flex:none; border:1px solid var(--tw-line); border-radius:9px; background:color-mix(in srgb, var(--tw-bg) 82%, transparent); backdrop-filter:blur(16px) saturate(1.5); -webkit-backdrop-filter:blur(16px) saturate(1.5); color:var(--tw-muted); cursor:pointer; transition:color .15s, border-color .15s, background .15s}
+.tw-settings-gear:hover{color:var(--tw-fg); border-color:var(--tw-accent)}
+.tw-settings-gear.tw-on{color:var(--tw-accent); border-color:var(--tw-accent); background:var(--tw-accent-soft)}
+.tw-settings-gear:focus-visible{outline:2px solid var(--tw-accent); outline-offset:2px}
+.tw-settings-gear svg{width:15px; height:15px; flex:none}
 .tw-comment{background:var(--tw-accent-soft); border-bottom:2px solid var(--tw-accent); border-radius:3px; padding:0 1px; cursor:pointer}
 .tw-comment:hover{background:color-mix(in srgb, var(--tw-accent) 24%, transparent)}
 @keyframes tw-comment-hl-flash{0%,100%{background:var(--tw-accent-soft)} 25%,70%{background:color-mix(in srgb, var(--tw-accent) 38%, transparent)}}
@@ -1675,6 +1811,6 @@ const TYPEWRIGHT_CSS = `
 .tw-composer-primary{background:var(--tw-accent); border-color:var(--tw-accent); color:#fff}
 .tw-composer-primary:hover{color:#fff; filter:brightness(1.06)}
 .tw-composer-btn:disabled{opacity:.5; cursor:default}
-@media (prefers-reduced-transparency: reduce){ .tw-selpop,.tw-composer,.tw-comments-toggle{backdrop-filter:none; -webkit-backdrop-filter:none; background:var(--tw-bg)} }
+@media (prefers-reduced-transparency: reduce){ .tw-selpop,.tw-composer,.tw-comments-toggle,.tw-settings-gear{backdrop-filter:none; -webkit-backdrop-filter:none; background:var(--tw-bg)} }
 @media (prefers-reduced-motion: reduce){ .tw-selpop,.tw-composer,.tw-comment-flash,.tw-editor-shell.tw-comments-open>.tw-editor{animation:none !important; transition:none !important} }
 `;
