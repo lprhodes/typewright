@@ -13,7 +13,7 @@ Zero-runtime-dependency engine · Obsidian-style unified live preview · semanti
 </div>
 
 > [!NOTE]
-> **Alpha (v0.2.0).** The engine is real and tested: a from-scratch,
+> **Alpha (v0.2.1).** The engine is real and tested: a from-scratch,
 > zero-runtime-dependency GFM+MDX parser → offset-exact AST → **sanitizing** HTML
 > renderer, an **incremental reparse**, unified-mode + fold services, and a
 > streaming **anticipation** renderer — all wired into working
