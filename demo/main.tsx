@@ -162,6 +162,9 @@ function App(): React.ReactElement {
   const [mode, setMode] = React.useState<EditorMode>('unified');
   const [theme, setTheme] = React.useState<'dark' | 'light'>('dark');
   const [toolbarMode, setToolbarMode] = React.useState<'floating' | 'docked'>('floating');
+  // `unifiedReveal`: 'block' (default) = classic click-to-edit-block; 'caret' =
+  // opt-in per-marker reveal around the caret (the contentEditable surface).
+  const [reveal, setReveal] = React.useState<'block' | 'caret'>('block');
   const [exts, setExts] = React.useState<ExtState>({ gfm: true, syntaxHighlight: true, folding: true, mdx: true, mermaid: true, math: true });
   const [threads, setThreads] = React.useState<CommentThread[]>(SEED_THREADS);
   const [stream, setStream] = React.useState('');
@@ -267,6 +270,7 @@ function App(): React.ReactElement {
                   value={md}
                   onChange={setMd}
                   mode={mode}
+                  unifiedReveal={reveal}
                   extensions={extensions}
                   folding={exts.folding}
                   comments={comments}
@@ -303,6 +307,20 @@ function App(): React.ReactElement {
                   <div className="seg" role="group" style={{ width: '100%' }}>
                     <button style={{ flex: 1 }} aria-pressed={toolbarMode === 'floating'} onClick={() => setToolbarMode('floating')}>Floating</button>
                     <button style={{ flex: 1 }} aria-pressed={toolbarMode === 'docked'} onClick={() => setToolbarMode('docked')}>Docked</button>
+                  </div>
+                </div>
+                <div>
+                  <h4>Live-preview reveal</h4>
+                  <div className="toggle">
+                    <label htmlFor="reveal-toggle">Caret-level marker reveal <span className="tk">unifiedReveal</span></label>
+                    <input
+                      id="reveal-toggle"
+                      data-testid="reveal-toggle"
+                      type="checkbox"
+                      checked={reveal === 'caret'}
+                      onChange={(e) => setReveal(e.target.checked ? 'caret' : 'block')}
+                      aria-label="Caret-level marker reveal"
+                    />
                   </div>
                 </div>
                 <div><h4>Drop-in usage</h4><div className="props">{propStr()}</div></div>

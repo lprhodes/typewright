@@ -146,6 +146,27 @@ function isCaretEligible(b: Block): boolean {
   return b.type === 'heading' || b.type === 'paragraph' || b.type === 'list' || b.type === 'blockquote';
 }
 
+/**
+ * Presentation-layer a11y hardening of already-sanitized block HTML before it is
+ * injected. The core renderer is intentionally attribute-minimal, so the disabled
+ * GFM task-list checkboxes ship without an accessible name — screen readers then
+ * announce an unlabeled checkbox ("Form elements must have labels", axe critical).
+ * Give them a name here, in the React surface. Idempotent; a no-op when the block
+ * has no task checkbox.
+ */
+function withA11yHints(html: string): string {
+  return html.replace(/<input type="checkbox" disabled/g, '<input type="checkbox" aria-label="Task item" disabled');
+}
+
+/**
+ * The rendered block HTML carries a focusable/interactive descendant (a link or a
+ * task checkbox). Wrapping such a block in a `role="button"` click-to-edit
+ * affordance would nest interactive controls (axe `nested-interactive`, serious),
+ * so those blocks drop the button role (staying keyboard-operable via tabindex +
+ * key handler) while marker-free blocks keep the richer button semantics.
+ */
+const HAS_INTERACTIVE_HTML = /<a[\s>]|<input\b/i;
+
 /** Build the island element for an island-eligible block (`code` is the block source). */
 function renderIsland(b: Block, ic: IslandCtx): React.ReactElement | null {
   if (isMdxIslandBlock(b, ic)) {
@@ -1237,7 +1258,7 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
             data-typewright="read"
             ref={collab.active ? collab.contentRef : undefined}
             // sanitized by render.ts
-            dangerouslySetInnerHTML={{ __html: html || `<p class="tw-placeholder">${escapeText(placeholder)}</p>` }}
+            dangerouslySetInnerHTML={{ __html: withA11yHints(html) || `<p class="tw-placeholder">${escapeText(placeholder)}</p>` }}
           />,
         );
       }
@@ -1262,7 +1283,7 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
                 data-tw-from={b.from}
                 data-tw-to={b.to}
                 // sanitized by render.ts
-                dangerouslySetInnerHTML={{ __html: renderNode(b, renderOpts) }}
+                dangerouslySetInnerHTML={{ __html: withA11yHints(renderNode(b, renderOpts)) }}
               />
             );
           })}
@@ -1909,10 +1930,19 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
               // the table grid (apply the splice + commit → anchors/folds/parse
               // all keep working). Opt-in; never on the default block path.
               <CaretRevealBlock block={b} source={mdRef.current} onChange={handleTableChange} readOnly={readOnly} />
-            ) : (
+            ) : (() => {
+              // Sanitized, a11y-hardened block HTML (task checkboxes labelled).
+              const html = withA11yHints(renderNode(b, renderOpts));
+              // A block whose content already holds a focusable control (link /
+              // task checkbox) must NOT also be a role="button" wrapper — that
+              // nests interactive controls. Such blocks stay keyboard-operable
+              // (tabindex + Enter/Space) but without the button role.
+              const hasInteractive = HAS_INTERACTIVE_HTML.test(html);
+              return (
               <div
                 className="tw-block"
-                role={readOnly ? undefined : 'button'}
+                role={readOnly || hasInteractive ? undefined : 'button'}
+                aria-label={!readOnly && hasInteractive ? 'Edit block source' : undefined}
                 tabIndex={readOnly ? undefined : 0}
                 data-tw-from={b.from}
                 data-tw-to={b.to}
@@ -1938,9 +1968,10 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
                   }
                 }}
                 // sanitized by render.ts
-                dangerouslySetInnerHTML={{ __html: renderNode(b, renderOpts) }}
+                dangerouslySetInnerHTML={{ __html: html }}
               />
-            )}
+              );
+            })()}
             {folded && (
               <button type="button" className="tw-foldchip" onClick={() => toggleFold(i)}>
                 … {foldedSummary(blocks, i)}
