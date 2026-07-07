@@ -1,6 +1,6 @@
 import * as React from 'react';
-import { applyCommand, COMMANDS, highlightToHtml, mapAnchor, parse, renderNode, renderToHtml } from '../core';
-import type { Block, Command, ParseOptions, RenderOptions } from '../core';
+import { applyCommand, COMMANDS, highlightToHtml, mapAnchor, parse, parseIncremental, renderNode, renderToHtml } from '../core';
+import type { Block, Command, Document, ParseOptions, RenderOptions } from '../core';
 import type {
   CommentsOptions,
   CommentThread,
@@ -527,6 +527,8 @@ function useCollab(
   md: string,
   mode: EditorMode,
   settingsControl?: React.ReactNode,
+  /** Bumps when the virtualized visible-block set changes, to re-run decorations. */
+  visibleRev = 0,
 ): CollabController {
   const opts = normalizeComments(comments);
   const commentsActive = !!opts && opts.enabled !== false;
@@ -659,8 +661,12 @@ function useCollab(
   React.useLayoutEffect(() => {
     const container = contentRef.current;
     if (!container || !active) return;
+    // `visibleRev` re-runs this after virtualization mounts/unmounts blocks, so
+    // highlights appear on newly-scrolled-in blocks. applyDecorations only walks
+    // the `.tw-block` elements currently in the DOM, so it never throws on the
+    // off-screen ones (their highlights draw when scrolled into view).
     applyDecorations(container, md, decorations, peers, activeThreadId);
-  }, [md, decorations, peers, activeThreadId, active, mode]);
+  }, [md, decorations, peers, activeThreadId, active, mode, visibleRev]);
 
   // Clicking a highlight opens its thread in the sidebar.
   React.useEffect(() => {
@@ -878,6 +884,7 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
       placeholder = 'Write Markdown…',
       theme,
       toolbar,
+      overscan,
       className,
       style,
     } = props;
@@ -1012,13 +1019,26 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
     const mdRef = React.useRef(md);
     mdRef.current = md;
 
+    // The most recent commit's `{prev → next}` transition + its change, captured
+    // so UnifiedEditor's parse memo can take the incremental (dirty-block) fast
+    // path (IJ4). Only consulted when it provably matches the string transition.
+    const lastCommitRef = React.useRef<{ prev: string; change: DocChange; next: string } | null>(null);
+
+    // Bumped whenever the virtualized visible-block set changes, so the collab
+    // decoration pass re-runs and highlights mount on newly-scrolled-in blocks.
+    const [visibleRev, setVisibleRev] = React.useState(0);
+    const bumpVisible = React.useCallback(() => setVisibleRev((r) => r + 1), []);
+
     // Collaboration controller (comments + presence). Inert unless the host
     // passes `comments`/`presence`, so default rendering is unchanged.
-    const collab = useCollab(comments, presence, md, mode, settingsControl);
+    const collab = useCollab(comments, presence, md, mode, settingsControl, visibleRev);
     const { onCommit } = collab;
 
     const commitValue = React.useCallback(
       (next: string, change: DocChange) => {
+        // Record the exact transition so the incremental parser can reuse the
+        // previous tree (verified against the string transition before use).
+        lastCommitRef.current = { prev: mdRef.current, change, next };
         if (!isControlled) setInternal(next);
         onChange?.(next, change);
         onCommit(change); // re-map comment anchors through this edit
@@ -1236,6 +1256,9 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
         contentRef={collab.active ? collab.contentRef : undefined}
         commentsActive={collab.commentsActive}
         onCommentSelect={collab.commentsActive ? collab.onSourceSelect : undefined}
+        overscan={overscan}
+        lastCommitRef={lastCommitRef}
+        onVisibleChange={collab.active ? bumpVisible : undefined}
       />,
     );
   },
@@ -1296,6 +1319,39 @@ function Toolbar({ mode, onCommand }: { mode: 'docked' | 'floating'; onCommand: 
 }
 
 /* ------------------------------------------------------------------ *
+ * Block-level viewport virtualization (IJ3) — tuning + scroll helpers
+ * ------------------------------------------------------------------ *
+ * Above VIRT_THRESHOLD visible blocks, only the blocks whose estimated vertical
+ * span intersects the scroll viewport (± overscan) are mounted; two spacer divs
+ * reserve the off-screen height. At/under the threshold the block list renders
+ * exactly as before (no wrapper, no spacers), so small docs are unchanged.
+ */
+
+/** Only virtualize once a doc has more than this many *visible* blocks. */
+const VIRT_THRESHOLD = 150;
+/** Height (px) assumed for a block row we have not measured yet. */
+const VIRT_EST_BLOCK = 40;
+/** Default overscan, in blocks, beyond each viewport edge (see `overscan`). */
+const VIRT_OVERSCAN_BLOCKS = 6;
+/** Bounded first window rendered before the scroll container is measured. */
+const VIRT_INITIAL = 50;
+
+/**
+ * Nearest scrollable ancestor of `el` (a host-provided scroll region), or null.
+ * Virtualization reuses the host's scroller when there is one; otherwise the
+ * editor supplies its own bounded scroll region (see `tw-virt-scroll`).
+ */
+function getScrollParent(el: HTMLElement): HTMLElement | null {
+  let node: HTMLElement | null = el.parentElement;
+  while (node) {
+    const s = getComputedStyle(node);
+    if (/(auto|scroll|overlay)/.test(s.overflowY + ' ' + s.overflow)) return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------ *
  * Unified (block-level) editor
  * ------------------------------------------------------------------ */
 
@@ -1326,10 +1382,16 @@ interface UnifiedProps {
   commentsActive?: boolean;
   /** Report a raw-source selection (document offsets) for the Comment popup. */
   onCommentSelect?: (docFrom: number, docTo: number, quote: string) => void;
+  /** Overscan (extra blocks beyond each viewport edge) for large-doc virtualization. */
+  overscan?: number;
+  /** Last commit's `{prev → next}` transition, enabling the incremental parse fast path. */
+  lastCommitRef?: React.MutableRefObject<{ prev: string; change: DocChange; next: string } | null>;
+  /** Called when the virtualized visible-block set changes (re-runs comment decorations). */
+  onVisibleChange?: () => void;
 }
 
 function UnifiedEditor(props: UnifiedProps): React.ReactElement {
-  const { md, mdRef, rootClass, style, readOnly, placeholder, foldingEnabled, showGutter, persistKey, commitValue, register, toolbar, parseOpts, renderOpts, bindings, islands, contentRef, commentsActive, onCommentSelect } = props;
+  const { md, mdRef, rootClass, style, readOnly, placeholder, foldingEnabled, showGutter, persistKey, commitValue, register, toolbar, parseOpts, renderOpts, bindings, islands, contentRef, commentsActive, onCommentSelect, overscan, lastCommitRef, onVisibleChange } = props;
   const [active, setActive] = React.useState<number | null>(null);
   const [draft, setDraft] = React.useState('');
   // Seed the folded set from persisted heading keys (re-anchored to the current
@@ -1376,7 +1438,31 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
     });
   });
 
-  const doc = React.useMemo(() => parse(md, parseOpts), [md, parseOpts]);
+  // Parse with an incremental (dirty-block) fast path (IJ4): when the previous
+  // parse tree is still valid and the last commit's change provably transforms
+  // its source into `md` under the SAME options, reuse it. `parseIncremental` is
+  // deep-equal to `parse` (and falls back internally), so this only saves work —
+  // it can never change the resulting tree. Any mismatch → a full parse.
+  const prevParse = React.useRef<{ src: string; opts: ParseOptions; doc: Document } | null>(null);
+  const doc = React.useMemo(() => {
+    const prev = prevParse.current;
+    const lc = lastCommitRef?.current ?? null;
+    let result: Document;
+    if (
+      prev &&
+      lc &&
+      prev.opts === parseOpts &&
+      lc.next === md &&
+      lc.prev === prev.src &&
+      lc.prev !== md
+    ) {
+      result = parseIncremental(prev.doc, prev.src, lc.change, md, parseOpts);
+    } else {
+      result = parse(md, parseOpts);
+    }
+    prevParse.current = { src: md, opts: parseOpts, doc: result };
+    return result;
+  }, [md, parseOpts, lastCommitRef]);
   const blocks = doc.children;
 
   // Refs let the fold/menu callbacks read the freshest blocks/source without
@@ -1521,6 +1607,128 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
     return set;
   }, [blocks, folds, foldingEnabled]);
 
+  /* --- Block-level viewport virtualization (large docs only, IJ3) ------ */
+  // The list of rows actually rendered (folded blocks excluded, as before).
+  const visible = React.useMemo(() => {
+    const arr: { b: Block; i: number }[] = [];
+    for (let i = 0; i < blocks.length; i++) if (!hidden.has(i)) arr.push({ b: blocks[i]!, i });
+    return arr;
+  }, [blocks, hidden]);
+  const virtualize = visible.length > VIRT_THRESHOLD;
+
+  // `overscan` is interpreted as a count of blocks, converted to px via the
+  // default block-height estimate. Default: VIRT_OVERSCAN_BLOCKS blocks/edge.
+  const overscanPx = Math.max(overscan ?? VIRT_OVERSCAN_BLOCKS, 0) * VIRT_EST_BLOCK;
+
+  // Measured row heights, keyed by block source offset (stable while scrolling an
+  // unedited region); unmeasured blocks fall back to VIRT_EST_BLOCK.
+  const heights = React.useRef<Map<number, number>>(new Map());
+  const heightOf = (b: Block): number => heights.current.get(b.from) ?? VIRT_EST_BLOCK;
+
+  const virtInnerRef = React.useRef<HTMLDivElement | null>(null);
+  const virtScrollRef = React.useRef<HTMLDivElement | null>(null);
+  const scrollerRef = React.useRef<HTMLElement | null>(null);
+  const [ownScroller, setOwnScroller] = React.useState(false);
+  const [range, setRange] = React.useState<{ start: number; end: number }>({ start: 0, end: 0 });
+
+  const computeRange = (): { start: number; end: number } => {
+    const n = visible.length;
+    const scroller = scrollerRef.current;
+    const content = virtInnerRef.current;
+    if (!scroller || !content || n === 0) return { start: 0, end: Math.min(n, VIRT_INITIAL) };
+    const scRect = scroller.getBoundingClientRect();
+    const coRect = content.getBoundingClientRect();
+    // Offset of the rows-content top within the scroller's scrollable content
+    // (constant regardless of scroll position).
+    const contentOffset = scroller.scrollTop + (coRect.top - scRect.top);
+    const winTop = scroller.scrollTop - contentOffset - overscanPx;
+    const winBottom = scroller.scrollTop - contentOffset + scroller.clientHeight + overscanPx;
+    let cum = 0;
+    let start = -1;
+    let end = 0;
+    for (let k = 0; k < n; k++) {
+      const top = cum;
+      const bottom = cum + heightOf(visible[k]!.b);
+      if (bottom > winTop && top < winBottom) {
+        if (start < 0) start = k;
+        end = k + 1;
+      }
+      cum = bottom;
+      if (top >= winBottom) break;
+    }
+    if (start < 0) { start = 0; end = 0; }
+    // The block being edited must always stay mounted so its commit is never
+    // lost, even if the user scrolled it out of view.
+    const a = activeRef.current;
+    if (a !== null) {
+      const av = visible.findIndex((v) => v.i === a);
+      if (av >= 0) {
+        if (av < start) start = av;
+        if (av + 1 > end) end = av + 1;
+      }
+    }
+    return { start, end };
+  };
+  const computeRangeRef = React.useRef(computeRange);
+  computeRangeRef.current = computeRange;
+
+  const setRangeIfChanged = React.useCallback((r: { start: number; end: number }) => {
+    setRange((prev) => (prev.start === r.start && prev.end === r.end ? prev : r));
+  }, []);
+
+  // Resolve the scroll container (a host-provided ancestor, else our own bounded
+  // wrapper) and keep the window in sync with scroll + resize (rAF-throttled).
+  React.useLayoutEffect(() => {
+    if (!virtualize) return;
+    const content = virtInnerRef.current;
+    if (!content) return;
+    let scroller: HTMLElement | null;
+    if (ownScroller) {
+      scroller = virtScrollRef.current;
+    } else {
+      scroller = getScrollParent(content);
+      if (!scroller) { setOwnScroller(true); return; }
+    }
+    if (!scroller) return;
+    scrollerRef.current = scroller;
+    let raf = 0;
+    const onScroll = (): void => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => { raf = 0; setRangeIfChanged(computeRangeRef.current()); });
+    };
+    scroller.addEventListener('scroll', onScroll, { passive: true });
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(onScroll) : null;
+    ro?.observe(scroller);
+    if (typeof window !== 'undefined') window.addEventListener('resize', onScroll);
+    setRangeIfChanged(computeRangeRef.current());
+    return () => {
+      scroller.removeEventListener('scroll', onScroll);
+      ro?.disconnect();
+      if (typeof window !== 'undefined') window.removeEventListener('resize', onScroll);
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, [virtualize, ownScroller, setRangeIfChanged]);
+
+  // After every render, measure mounted rows into the height cache and re-derive
+  // the window (guarded so it converges without looping) — covers content/fold
+  // changes, and refines estimates as real heights become known.
+  React.useLayoutEffect(() => {
+    if (!virtualize) return;
+    rowEls.current.forEach((el, idx) => {
+      const b = blocks[idx];
+      if (!b) return;
+      const h = el.offsetHeight;
+      if (h > 0) heights.current.set(b.from, h);
+    });
+    setRangeIfChanged(computeRangeRef.current());
+  });
+
+  // Notify the parent when the visible set changes, so comment decorations
+  // re-apply to newly-mounted blocks (no-op when comments/presence are off).
+  React.useLayoutEffect(() => {
+    if (virtualize) onVisibleChange?.();
+  }, [range.start, range.end, virtualize, onVisibleChange]);
+
   if (readOnly && !md.trim()) {
     return (
       <div className={rootClass} style={style} data-typewright="unified" ref={contentRef}>
@@ -1550,18 +1758,14 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
     );
   }
 
-  return (
-    <div className={rootClass} style={style} data-typewright="unified" ref={contentRef}>
-      {toolbar}
-      {blocks.map((b, i) => {
-        if (hidden.has(i)) return null;
-        const isHeading = b.type === 'heading';
-        const folded = isHeading && folds.has(i);
-        // Executable islands (MDX / Mermaid) render read-only in unified/preview —
-        // like tables, they are NOT click-to-edit source; the raw source is
-        // reached in `edit` mode. Null unless the host wired the extension up.
-        const islandEl = renderIsland(b, islands);
-        return (
+  const renderRow = (i: number, b: Block): React.ReactElement => {
+    const isHeading = b.type === 'heading';
+    const folded = isHeading && folds.has(i);
+    // Executable islands (MDX / Mermaid) render read-only in unified/preview —
+    // like tables, they are NOT click-to-edit source; the raw source is
+    // reached in `edit` mode. Null unless the host wired the extension up.
+    const islandEl = renderIsland(b, islands);
+    return (
           <div
             className="tw-row"
             key={`${i}-${b.from}`}
@@ -1675,8 +1879,41 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
               </button>
             )}
           </div>
-        );
-      })}
+    );
+  };
+
+  // Small doc: render exactly as before (no wrapper, no spacers).
+  if (!virtualize) {
+    return (
+      <div className={rootClass} style={style} data-typewright="unified" ref={contentRef}>
+        {toolbar}
+        {blocks.map((b, i) => (hidden.has(i) ? null : renderRow(i, b)))}
+      </div>
+    );
+  }
+
+  // Large doc: mount only the windowed run; reserve the rest with spacers.
+  const start = Math.min(range.start, visible.length);
+  const end = Math.min(range.end, visible.length);
+  let topPx = 0;
+  for (let k = 0; k < start; k++) topPx += heightOf(visible[k]!.b);
+  let bottomPx = 0;
+  for (let k = end; k < visible.length; k++) bottomPx += heightOf(visible[k]!.b);
+
+  return (
+    <div className={rootClass} style={style} data-typewright="unified" ref={contentRef}>
+      {toolbar}
+      <div
+        ref={virtScrollRef}
+        className={ownScroller ? 'tw-virt-scroll' : undefined}
+        style={ownScroller ? { overflow: 'auto', maxHeight: '70vh' } : undefined}
+      >
+        <div ref={virtInnerRef} className="tw-virt-content">
+          <div className="tw-virt-spacer" aria-hidden="true" style={{ height: topPx }} />
+          {visible.slice(start, end).map(({ b, i }) => renderRow(i, b))}
+          <div className="tw-virt-spacer" aria-hidden="true" style={{ height: bottomPx }} />
+        </div>
+      </div>
     </div>
   );
 }

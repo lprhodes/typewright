@@ -17,7 +17,7 @@ import type {
 export * from '../types';
 
 /* Headless engine surface — parser, renderer, unified-mode, folding, doc model. */
-export { parse } from './parser';
+export { parse, parseIncremental } from './parser';
 export { renderToHtml, renderInline, renderNode, safeUrl } from './render';
 export type { RenderOptions } from './render';
 export { collectMarkers, hiddenMarkers, activeBlockIndex } from './unified';

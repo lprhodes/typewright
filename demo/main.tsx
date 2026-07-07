@@ -45,6 +45,16 @@ const SEED_COMMENTS: Thread[] = [
 ];
 const REACTS = ['👍', '🎯', '👀', '🎉'];
 
+/** A large synthetic document (headings + paragraphs) to exercise virtualization. */
+function makeLargeDoc(n: number): string {
+  const parts: string[] = [];
+  for (let i = 0; i < n; i++) {
+    if (i % 4 === 0) parts.push(`## Section ${i}`);
+    else parts.push(`Paragraph ${i} with **bold** and _italic_ text and a [link](https://example.com/${i}).`);
+  }
+  return parts.join('\n\n');
+}
+
 /* toolbar icons (design-preview) */
 const TI: Record<string, React.ReactElement> = {
   link: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round"><path d="M9 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1M15 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1" /></svg>,
@@ -206,6 +216,7 @@ function App(): React.ReactElement {
           </div>
         </div>
         <div className="meta" data-testid="value-len">len:{md.length} · mode:{mode}</div>
+        <button className="btn" data-testid="load-large" style={{ marginTop: 6 }} onClick={() => { setMode('unified'); setMd(makeLargeDoc(800)); }}>Load large doc (virtualization)</button>
 
         <p className="section-label">Streaming preview</p>
         <button className="btn" data-testid="play-stream" onClick={play}>▶ Play stream</button>
