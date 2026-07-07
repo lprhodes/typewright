@@ -231,5 +231,12 @@ Implementation plan: `docs/plans/plan-TW-0002.md` (Plan size: Large).
 
 **Gates (actually run):** typecheck ✅ · tsup build ✅ · unit 298 passed ✅ · Playwright e2e 13 passed ✅ · size budget ✅. (Pre-existing caveat: `parser.perf.test.ts` has 2 wall-clock-threshold flakes that also fail on `main` under load — excluded; not a regression.)
 
-<!-- ship-feature Phase 6 (comprehensive e2e) + Phase 7 (stop) follow. -->
+### Acceptance E2E — 2026-07-08
+
+Comprehensive Playwright suite added (7 specs / 26 tests; **39 total**) covering comments, settings + ⌘K palette, syntax highlighting, MDX/Mermaid islands, math, table grid, fold menu, footnotes, and presence — driven against the wired demo, **green on two consecutive runs**. The suite surfaced and fixed 2 runtime bugs (compile-clean but broken): opening the comments sidebar wiped anchored highlights (`applyDecorations` missing an `open` dep); ⌘K-palette commands no-op'd because `SourceArea.onBlur` cleared the active-source registration when the palette stole focus.
+
+### Status: ready for human review — NOT merged
+
+Per the ship-feature run configuration (stop before merge), `ai/tw-0002` is **left local and unmerged**. Final pre-merge gate (all actually run): typecheck ✅ · tsup build ✅ · unit 298 ✅ · Playwright e2e 39 ✅ (twice) · size budget ✅. Branch rebased on `main`, worktree clean, 16 commits. Sole red: 2 `parser.perf.test.ts` wall-clock flakes that also fail on `main` under load (pre-existing, not a regression).
+
 
