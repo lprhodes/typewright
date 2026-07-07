@@ -1,12 +1,14 @@
 import * as React from 'react';
-import { applyCommand, parse, renderNode, renderToHtml } from '../core';
-import type { Command } from '../core';
-import type { DocChange, EditorConfig, EditorEvents } from '../types';
+import { applyCommand, COMMANDS, highlightToHtml, parse, renderNode, renderToHtml } from '../core';
+import type { Command, ParseOptions, RenderOptions } from '../core';
+import type { DocChange, EditorConfig, EditorEvents, EditorMode, KeymapOptions } from '../types';
 
 /** Imperative handle exposed via a ref on `<TypewrightEditor>`. */
 export interface TypewrightEditorHandle {
   /** Apply a formatting command to the currently-focused editing surface. */
   applyCommand: (command: Command) => void;
+  /** Switch the editor mode; also fires `onModeChange`. */
+  setMode: (mode: EditorMode) => void;
 }
 
 /** Registration of the currently-focused source textarea (for toolbar commands). */
@@ -53,34 +55,93 @@ export function useInjectStyles(): void {
   }, []);
 }
 
-function wrapSelection(el: HTMLTextAreaElement, before: string, after: string): { value: string; start: number; end: number } {
-  const s = el.selectionStart;
-  const e = el.selectionEnd;
-  const v = el.value;
-  const sel = v.slice(s, e);
-  const value = v.slice(0, s) + before + sel + after + v.slice(e);
-  return { value, start: s + before.length, end: e + before.length };
+/** Whether an extension flag is on: `true`, or an options object not explicitly disabled. */
+function extEnabled(x: boolean | { enabled?: boolean } | undefined, dflt = false): boolean {
+  if (x === undefined) return dflt;
+  if (typeof x === 'boolean') return x;
+  return x.enabled !== false;
 }
 
-/** Standard editing shortcuts on a textarea; returns the new value or null. */
-function handleShortcut(
-  e: React.KeyboardEvent<HTMLTextAreaElement>,
-): { value: string; start: number; end: number } | null {
-  const mod = e.metaKey || e.ctrlKey;
-  if (!mod) return null;
-  const el = e.currentTarget;
-  switch (e.key.toLowerCase()) {
-    case 'b':
-      return wrapSelection(el, '**', '**');
-    case 'i':
-      return wrapSelection(el, '*', '*');
-    case 'k':
-      return wrapSelection(el, '[', '](url)');
-    case 'e':
-      return wrapSelection(el, '`', '`');
-    default:
-      return null;
+/* ------------------------------------------------------------------ *
+ * Keymap — shortcuts dispatch real COMMANDS through `applyCommand`
+ * (toggle-aware, so ⌘B twice returns the original text), never the
+ * insert-only wrap that would double-wrap.
+ * ------------------------------------------------------------------ */
+
+/** Command ids that exist, for validating host-supplied bindings. */
+const COMMAND_IDS = new Set<string>(COMMANDS.map((c) => c.id));
+
+/** Canonical binding string: modifiers (mod, alt, shift) then key, e.g. `mod+b`. */
+function canonKey(raw: string): string {
+  const toks = raw
+    .toLowerCase()
+    .replace(/-/g, '+')
+    .split('+')
+    .map((t) => t.trim())
+    .filter(Boolean);
+  let mod = false;
+  let alt = false;
+  let shift = false;
+  let key = '';
+  for (const t of toks) {
+    if (t === 'mod' || t === 'cmd' || t === 'meta' || t === 'ctrl' || t === 'control') mod = true;
+    else if (t === 'alt' || t === 'option' || t === 'opt') alt = true;
+    else if (t === 'shift') shift = true;
+    else key = t;
   }
+  const parts: string[] = [];
+  if (mod) parts.push('mod');
+  if (alt) parts.push('alt');
+  if (shift) parts.push('shift');
+  parts.push(key);
+  return parts.join('+');
+}
+
+/** A displayed shortcut (`⌘B`, `⇧⌥K`) → a canonical binding string. */
+function kbdToBinding(kbd: string): string | null {
+  let key = '';
+  const mods: string[] = [];
+  for (const ch of kbd) {
+    if (ch === '⌘' || ch === '⌃') mods.push('mod');
+    else if (ch === '⇧') mods.push('shift');
+    else if (ch === '⌥') mods.push('alt');
+    else if (ch.trim()) key += ch;
+  }
+  key = key.toLowerCase();
+  if (!key) return null;
+  return canonKey([...mods, key].join('+'));
+}
+
+/** The canonical binding string for a live keyboard event. */
+function eventCanon(e: React.KeyboardEvent<HTMLTextAreaElement>): string {
+  const parts: string[] = [];
+  if (e.metaKey || e.ctrlKey) parts.push('mod');
+  if (e.altKey) parts.push('alt');
+  if (e.shiftKey) parts.push('shift');
+  parts.push(e.key.toLowerCase());
+  return parts.join('+');
+}
+
+/**
+ * Build the active binding map from {@link KeymapOptions}. The `default` preset
+ * seeds bindings from every command's displayed `kbd`; `none` starts empty.
+ * `keymap.bindings` (keys like `"Mod-b"`) then override, keeping only valid ids.
+ */
+function buildKeymap(keymap?: KeymapOptions): Map<string, Command> {
+  const map = new Map<string, Command>();
+  if ((keymap?.preset ?? 'default') !== 'none') {
+    for (const c of COMMANDS) {
+      if (!c.kbd) continue;
+      const b = kbdToBinding(c.kbd);
+      if (b) map.set(b, c.id);
+    }
+  }
+  if (keymap?.bindings) {
+    for (const [raw, cmd] of Object.entries(keymap.bindings)) {
+      if (COMMAND_IDS.has(cmd)) map.set(canonKey(raw), cmd as Command);
+    }
+  }
+  return map;
 }
 
 export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, TypewrightEditorProps>(
@@ -91,8 +152,11 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
       defaultValue,
       onChange,
       onSelectionChange,
-      mode = 'unified',
+      onModeChange,
+      mode: modeProp = 'unified',
+      extensions,
       folding,
+      keymap,
       readOnly = false,
       placeholder = 'Write Markdown…',
       theme,
@@ -100,6 +164,40 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
       className,
       style,
     } = props;
+
+    // Mode is controlled-or-internal (like value/defaultValue): the internal
+    // state is seeded from the prop, a changed prop from the parent wins, and
+    // `setMode` drives it from inside (settings panel / imperative handle).
+    const [modeState, setModeState] = React.useState<EditorMode>(modeProp);
+    const lastModeProp = React.useRef(modeProp);
+    if (modeProp !== lastModeProp.current) {
+      lastModeProp.current = modeProp;
+      setModeState(modeProp);
+    }
+    const mode = modeState;
+    const setMode = React.useCallback(
+      (m: EditorMode) => {
+        setModeState(m);
+        onModeChange?.(m);
+      },
+      [onModeChange],
+    );
+
+    // Parse: footnotes + conservative def-lists on by default; math only when the
+    // extension is on (`$` is common in prose). Render: syntax highlighting when
+    // enabled — math stays undefined so the escaped tw-math-src fallback holds.
+    // Memoized on the resolved flags so the downstream parse memo stays stable.
+    const mathOn = extEnabled(extensions?.math);
+    const highlightOn = extEnabled(extensions?.syntaxHighlight);
+    const parseOpts = React.useMemo<ParseOptions>(
+      () => ({ footnotes: true, defLists: true, math: mathOn }),
+      [mathOn],
+    );
+    const renderOpts = React.useMemo<RenderOptions>(
+      () => ({ highlight: highlightOn ? highlightToHtml : undefined }),
+      [highlightOn],
+    );
+    const keymapBindings = React.useMemo(() => buildKeymap(keymap), [keymap]);
 
     const isControlled = value !== undefined;
     const [internal, setInternal] = React.useState<string>(defaultValue ?? '');
@@ -125,7 +223,7 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
     const applyCmd = React.useCallback((cmd: Command) => {
       activeSource.current?.apply(cmd);
     }, []);
-    React.useImperativeHandle(forwardedRef, () => ({ applyCommand: applyCmd }), [applyCmd]);
+    React.useImperativeHandle(forwardedRef, () => ({ applyCommand: applyCmd, setMode }), [applyCmd, setMode]);
 
     const foldable = folding === undefined ? true : folding !== false;
     const appearance = theme?.appearance ?? 'auto';
@@ -148,6 +246,7 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
             onChange={(next, change) => commitValue(next, change)}
             onSelect={onSelectionChange}
             register={register}
+            bindings={keymapBindings}
             full
           />
         </div>
@@ -155,7 +254,7 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
     }
 
     if (mode === 'read') {
-      const html = renderToHtml(parse(md));
+      const html = renderToHtml(parse(md, parseOpts), renderOpts);
       return (
         <div
           className={rootClass}
@@ -180,6 +279,9 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
         commitValue={commitValue}
         register={register}
         toolbar={toolbarEl}
+        parseOpts={parseOpts}
+        renderOpts={renderOpts}
+        bindings={keymapBindings}
       />
     );
   },
@@ -254,10 +356,13 @@ interface UnifiedProps {
   commitValue: (next: string, change: DocChange) => void;
   register?: (api: ActiveSource | null) => void;
   toolbar?: React.ReactNode;
+  parseOpts: ParseOptions;
+  renderOpts: RenderOptions;
+  bindings: Map<string, Command>;
 }
 
 function UnifiedEditor(props: UnifiedProps): React.ReactElement {
-  const { md, mdRef, rootClass, style, readOnly, placeholder, foldable, commitValue, register, toolbar } = props;
+  const { md, mdRef, rootClass, style, readOnly, placeholder, foldable, commitValue, register, toolbar, parseOpts, renderOpts, bindings } = props;
   const [active, setActive] = React.useState<number | null>(null);
   const [draft, setDraft] = React.useState('');
   const [folds, setFolds] = React.useState<Set<number>>(() => new Set());
@@ -296,7 +401,7 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
     });
   });
 
-  const doc = React.useMemo(() => parse(md), [md]);
+  const doc = React.useMemo(() => parse(md, parseOpts), [md, parseOpts]);
   const blocks = doc.children;
 
   const commit = React.useCallback((): { next: string; change: DocChange | null } => {
@@ -305,14 +410,14 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
     activeRef.current = null;
     setActive(null);
     if (a === null) return { next: src, change: null };
-    const b = parse(src).children[a];
+    const b = parse(src, parseOpts).children[a];
     if (!b) return { next: src, change: null };
     const next = src.slice(0, b.from) + draftRef.current + src.slice(b.to);
     const change: DocChange = { from: b.from, to: b.to, insert: draftRef.current };
     if (next !== src) commitValue(next, change);
     mdRef.current = next; // keep the ref consistent for an immediate re-activation
     return { next, change };
-  }, [mdRef, commitValue]);
+  }, [mdRef, commitValue, parseOpts]);
 
   // Activate the block the user clicked (identified by its source OFFSET) after
   // committing any in-progress edit — the offset is mapped through that commit so
@@ -326,7 +431,7 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
       if (change && clickedFrom >= change.to) {
         mapped = clickedFrom + (change.insert.length - (change.to - change.from));
       }
-      const nextBlocks = parse(next).children;
+      const nextBlocks = parse(next, parseOpts).children;
       let idx = nextBlocks.findIndex((bl) => mapped >= bl.from && mapped < bl.to);
       if (idx < 0) idx = nextBlocks.findIndex((bl) => bl.from === mapped);
       const b = nextBlocks[idx];
@@ -338,7 +443,7 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
         setActive(idx);
       }
     },
-    [commit, readOnly, captureFlip],
+    [commit, readOnly, captureFlip, parseOpts],
   );
 
   // which block indices are hidden by a folded ancestor heading
@@ -376,6 +481,7 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
           full
           placeholder={placeholder}
           register={register}
+          bindings={bindings}
           onFocus={() => setTyping(true)}
           onBlur={() => setTyping(false)}
           onChange={(next, change) => commitValue(next, change)}
@@ -424,6 +530,7 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
                 value={draft}
                 autoFocus
                 register={register}
+                bindings={bindings}
                 onChange={(next) => setDraft(next)}
                 onBlur={() => { captureFlip(); commit(); }}
                 onEscape={() => { captureFlip(); commit(); }}
@@ -445,7 +552,7 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
                   }
                 }}
                 // sanitized by render.ts
-                dangerouslySetInnerHTML={{ __html: renderNode(b) }}
+                dangerouslySetInnerHTML={{ __html: renderNode(b, renderOpts) }}
               />
             )}
             {folded && (
@@ -489,10 +596,12 @@ interface SourceAreaProps {
   placeholder?: string;
   full?: boolean;
   register?: (api: ActiveSource | null) => void;
+  /** Active keyboard shortcuts (canonical binding → command). */
+  bindings?: Map<string, Command>;
 }
 
 function SourceArea(props: SourceAreaProps): React.ReactElement {
-  const { value, onChange, onBlur, onEscape, onFocus, onSelect, autoFocus, readOnly, placeholder, full, register } = props;
+  const { value, onChange, onBlur, onEscape, onFocus, onSelect, autoFocus, readOnly, placeholder, full, register, bindings } = props;
   const ref = React.useRef<HTMLTextAreaElement>(null);
   const pendingSel = React.useRef<[number, number] | null>(null);
 
@@ -555,11 +664,12 @@ function SourceArea(props: SourceAreaProps): React.ReactElement {
           onEscape();
           return;
         }
-        const res = handleShortcut(e);
-        if (res) {
+        // Route shortcuts through the SAME toggle-aware applyCommand path the
+        // toolbar uses, so ⌘B toggles (and un-toggles) instead of double-wrapping.
+        const cmd = bindings?.get(eventCanon(e));
+        if (cmd) {
           e.preventDefault();
-          pendingSel.current = [res.start, res.end];
-          onChange(res.value, { from: 0, to: value.length, insert: res.value });
+          apply(cmd);
         }
       }}
     />
@@ -624,4 +734,12 @@ const TYPEWRIGHT_CSS = `
 .tw-skeleton-bar{height:8px; border-radius:4px; background:var(--tw-line); margin-top:9px} .tw-skeleton-bar.two{width:70%} .tw-skeleton-bar.three{width:45%}
 @keyframes tw-shimmer{to{background-position:-200% 0}}
 @media (prefers-reduced-motion: reduce){ .tw-caret,.tw-skeleton,.tw-streamblk.tw-stream-in,.tw-row{animation:none !important; transition:none !important} }
+.tw-editor .tw-tok-keyword{color:#cf222e} .tw-editor .tw-tok-string{color:#0a3069} .tw-editor .tw-tok-comment{color:#6e7781; font-style:italic} .tw-editor .tw-tok-number{color:#0550ae} .tw-editor .tw-tok-punct{color:var(--tw-muted)} .tw-editor .tw-tok-fn{color:#8250df} .tw-editor .tw-tok-type{color:#953800} .tw-editor .tw-tok-prop{color:#116329}
+@media (prefers-color-scheme: dark){ .tw-editor:not(.tw-theme-light) .tw-tok-keyword{color:#ff7b72} .tw-editor:not(.tw-theme-light) .tw-tok-string{color:#a5d6ff} .tw-editor:not(.tw-theme-light) .tw-tok-comment{color:#8b949e} .tw-editor:not(.tw-theme-light) .tw-tok-number{color:#79c0ff} .tw-editor:not(.tw-theme-light) .tw-tok-fn{color:#d2a8ff} .tw-editor:not(.tw-theme-light) .tw-tok-type{color:#ffa657} .tw-editor:not(.tw-theme-light) .tw-tok-prop{color:#7ee787} }
+.tw-editor.tw-theme-dark .tw-tok-keyword{color:#ff7b72} .tw-editor.tw-theme-dark .tw-tok-string{color:#a5d6ff} .tw-editor.tw-theme-dark .tw-tok-comment{color:#8b949e} .tw-editor.tw-theme-dark .tw-tok-number{color:#79c0ff} .tw-editor.tw-theme-dark .tw-tok-fn{color:#d2a8ff} .tw-editor.tw-theme-dark .tw-tok-type{color:#ffa657} .tw-editor.tw-theme-dark .tw-tok-prop{color:#7ee787}
+.tw-editor .tw-math-src{font-family:"SF Mono",ui-monospace,Menlo,monospace; font-size:.9em; background:var(--tw-code-bg); border:1px solid var(--tw-line); border-radius:5px; padding:1px 5px}
+.tw-editor div.tw-math-src{display:block; padding:8px 12px; margin:.6em 0; text-align:center; overflow-x:auto}
+.tw-editor .tw-footnotes{border-top:1px solid var(--tw-line); margin-top:1.4em; padding-top:.6em; font-size:.9em; color:var(--tw-muted)}
+.tw-editor .tw-fnref{font-size:.82em} .tw-editor .tw-fnref a{color:var(--tw-accent); border-bottom:0} .tw-editor .tw-fn-back{color:var(--tw-accent); border-bottom:0; margin-left:4px; text-decoration:none}
+.tw-editor dl{margin:.5em 0} .tw-editor dt{font-weight:680; margin-top:.4em} .tw-editor dd{margin:.15em 0 .35em 1.4em; color:var(--tw-muted)}
 `;
