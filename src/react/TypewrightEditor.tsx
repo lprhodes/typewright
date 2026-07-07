@@ -685,8 +685,12 @@ function useCollab(
     // highlights appear on newly-scrolled-in blocks. applyDecorations only walks
     // the `.tw-block` elements currently in the DOM, so it never throws on the
     // off-screen ones (their highlights draw when scrolled into view).
+    // `open` is a dep because toggling the sidebar re-renders the content (which
+    // resets each block's innerHTML, dropping the imperatively-added highlight
+    // marks); re-running here re-draws them so highlights persist while the
+    // review sidebar is open.
     applyDecorations(container, md, decorations, peers, activeThreadId);
-  }, [md, decorations, peers, activeThreadId, active, mode, visibleRev]);
+  }, [md, decorations, peers, activeThreadId, active, mode, visibleRev, open]);
 
   // Clicking a highlight opens its thread in the sidebar.
   React.useEffect(() => {
@@ -2107,7 +2111,10 @@ function SourceArea(props: SourceAreaProps): React.ReactElement {
         register?.({ apply });
       }}
       onBlur={() => {
-        register?.(null);
+        // Keep the last-focused source registered on blur: a focus-stealing
+        // surface (the ⌘K command palette) must still be able to apply a command
+        // to this textarea's retained selection. The apply() closure guards on a
+        // null ref, so a since-unmounted source is a safe no-op.
         onBlur?.();
       }}
       onSelect={(e) => {

@@ -33,7 +33,9 @@ const x: number = 1;
 
 ## Second section
 
-Content under the second heading.
+Content under the second heading.[^1]
+
+[^1]: A clarifying footnote with a [reference link](https://example.org).
 
 ## Extensions
 
