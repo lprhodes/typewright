@@ -1,7 +1,18 @@
 import * as React from 'react';
-import { applyCommand, COMMANDS, highlightToHtml, parse, renderNode, renderToHtml } from '../core';
+import { applyCommand, COMMANDS, highlightToHtml, mapAnchor, parse, renderNode, renderToHtml } from '../core';
 import type { Block, Command, ParseOptions, RenderOptions } from '../core';
-import type { DocChange, EditorConfig, EditorEvents, EditorMode, FoldingOptions, KeymapOptions } from '../types';
+import type {
+  CommentsOptions,
+  CommentThread,
+  DocChange,
+  EditorConfig,
+  EditorEvents,
+  EditorMode,
+  FoldingOptions,
+  KeymapOptions,
+  PresencePeer,
+} from '../types';
+import { CommentsSidebar, COMMENTS_CSS } from './CommentsSidebar';
 import { FoldMenu, FOLDMENU_CSS } from './FoldMenu';
 import { TableGrid, TABLEGRID_CSS } from './TableGrid';
 
@@ -53,8 +64,9 @@ export function useInjectStyles(): void {
     const el = document.createElement('style');
     el.id = STYLE_ID;
     // One injected sheet keyed by STYLE_ID carries the editor chrome plus the
-    // widget-island styles (table grid + fold menu), so consumers need no extra CSS.
-    el.textContent = TYPEWRIGHT_CSS + TABLEGRID_CSS + FOLDMENU_CSS;
+    // widget-island styles (table grid + fold menu + comments sidebar), so
+    // consumers need no extra CSS.
+    el.textContent = TYPEWRIGHT_CSS + TABLEGRID_CSS + FOLDMENU_CSS + COMMENTS_CSS;
     document.head.appendChild(el);
   }, []);
 }
@@ -148,6 +160,609 @@ function buildKeymap(keymap?: KeymapOptions): Map<string, Command> {
   return map;
 }
 
+/* ------------------------------------------------------------------ *
+ * Collaboration — anchored comments + live presence (plan A3/A4)
+ * ------------------------------------------------------------------ *
+ * A controlled, data-in/events-out surface. The host owns the threads; the
+ * editor keeps a LOCAL map of live anchor positions that survive edits (via
+ * `mapAnchor` on every commit) and draws highlights + remote cursors over the
+ * rendered content by wrapping existing text nodes — never by string-injecting
+ * HTML, so the render.ts sanitizer boundary is untouched.
+ */
+
+/** Normalize `comments` (`boolean | CommentsOptions`) to options-or-null. */
+function normalizeComments(comments: boolean | CommentsOptions | undefined): CommentsOptions | null {
+  if (!comments) return null;
+  if (comments === true) return { enabled: true, threads: [] };
+  return comments;
+}
+
+/** A single live decoration: where a thread's highlight is drawn *now*. */
+interface LiveDecoration {
+  id: string;
+  from: number;
+  to: number;
+  quote: string;
+}
+
+/** A pending selection the "💬 Comment" popup is offered for. */
+interface PendingSelection {
+  anchor: { from: number; to: number };
+  quote: string;
+  /** Viewport coordinates the popup/composer anchor to (position: fixed). */
+  x: number;
+  y: number;
+}
+
+/**
+ * Reduce a Markdown source slice to its approximate rendered text so a comment
+ * highlight can be located by string match against the rendered DOM (where the
+ * markers have been stripped). Conservative: strips the common block + inline
+ * markers and collapses whitespace; anything it misses just means the match
+ * falls back to a coarser range, never a wrong or unsafe one.
+ */
+function plainify(src: string): string {
+  let s = src;
+  // Leading block markers (heading / blockquote / list / task).
+  s = s.replace(/^\s*#{1,6}\s+/, '');
+  s = s.replace(/^\s*>\s?/gm, '');
+  s = s.replace(/^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?/gm, '');
+  // Inline links / images → their visible text.
+  s = s.replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1');
+  // Inline emphasis / code / strike markers.
+  s = s.replace(/(\*\*|__|~~|\*|_|`)/g, '');
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+/** Initials for a presence chip (up to two letters). */
+function peerInitials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  const first = parts[0]?.[0] ?? '';
+  const last = parts.length > 1 ? parts[parts.length - 1]?.[0] ?? '' : '';
+  return (first + last).toUpperCase() || '?';
+}
+
+/**
+ * Merge host threads with locally-created (optimistic) ones, dropping any local
+ * thread the host has since echoed back (matched by quote + body) so a created
+ * comment shows instantly and de-duplicates once the host re-supplies `threads`.
+ */
+function mergeThreads(host: CommentThread[], local: CommentThread[]): CommentThread[] {
+  if (local.length === 0) return host;
+  const echoed = (l: CommentThread): boolean =>
+    host.some((h) => h.quote === l.quote && h.body === l.body);
+  return [...host, ...local.filter((l) => !echoed(l))];
+}
+
+/**
+ * Tighten a change to its minimal edit by trimming the common prefix/suffix of
+ * the replaced text and the inserted text. Whole-region replaces — the block
+ * commit `{from,to,insert:draft}` and command applies `{from:0,to:len,insert}` —
+ * would otherwise span text that did not actually change, so `mapAnchor` would
+ * collapse any anchor inside that span. Minimizing first keeps anchors alive
+ * across in-block edits and command applies (SPEC edge case).
+ */
+function minimizeChange(change: DocChange, prevDoc: string): DocChange {
+  const { from, to } = change;
+  const removed = prevDoc.slice(from, to);
+  const inserted = change.insert;
+  let p = 0;
+  const maxP = Math.min(removed.length, inserted.length);
+  while (p < maxP && removed.charCodeAt(p) === inserted.charCodeAt(p)) p++;
+  let s = 0;
+  const maxS = Math.min(removed.length - p, inserted.length - p);
+  while (s < maxS && removed.charCodeAt(removed.length - 1 - s) === inserted.charCodeAt(inserted.length - 1 - s)) s++;
+  return { from: from + p, to: to - s, insert: inserted.slice(p, inserted.length - s) };
+}
+
+/* ---- DOM text-node decoration (sanitizer-safe: wraps existing nodes) ---- */
+
+/** Remove every collab decoration this module previously inserted into `scope`. */
+function clearDecorations(scope: HTMLElement): void {
+  scope.querySelectorAll('mark.tw-comment').forEach((mark) => {
+    const parent = mark.parentNode;
+    if (!parent) return;
+    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+    parent.removeChild(mark);
+  });
+  scope.querySelectorAll('.tw-remote-cursor').forEach((c) => c.remove());
+  scope.normalize();
+}
+
+/** The concatenated text-node content of `scope`, plus a locator by char index. */
+function textNodesOf(scope: HTMLElement): { nodes: Text[]; text: string } {
+  const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+  const nodes: Text[] = [];
+  let text = '';
+  let n = walker.nextNode();
+  while (n) {
+    const t = n as Text;
+    nodes.push(t);
+    text += t.nodeValue ?? '';
+    n = walker.nextNode();
+  }
+  return { nodes, text };
+}
+
+/** Resolve a char index within `scope`'s text to a `{node, offset}` position. */
+function locateCharIndex(nodes: Text[], index: number): { node: Text; offset: number } | null {
+  let pos = 0;
+  for (const node of nodes) {
+    const len = node.nodeValue?.length ?? 0;
+    if (index <= pos + len) return { node, offset: Math.max(0, index - pos) };
+    pos += len;
+  }
+  const last = nodes[nodes.length - 1];
+  return last ? { node: last, offset: last.nodeValue?.length ?? 0 } : null;
+}
+
+/**
+ * Wrap the `[start, end)` character span of `scope`'s concatenated text in a
+ * `<mark class="tw-comment" data-thread=id>`. Splits at text-node boundaries so
+ * each wrapped fragment stays inside one text node (safe for `surroundContents`).
+ */
+function wrapCharRange(scope: HTMLElement, start: number, end: number, id: string, flash: boolean): HTMLElement | null {
+  if (end <= start) return null;
+  const { nodes } = textNodesOf(scope);
+  const segments: { node: Text; s: number; e: number }[] = [];
+  let pos = 0;
+  for (const node of nodes) {
+    const len = node.nodeValue?.length ?? 0;
+    const nodeStart = pos;
+    const nodeEnd = pos + len;
+    const s = Math.max(start, nodeStart);
+    const e = Math.min(end, nodeEnd);
+    if (s < e) segments.push({ node, s: s - nodeStart, e: e - nodeStart });
+    pos = nodeEnd;
+    if (pos >= end) break;
+  }
+  let first: HTMLElement | null = null;
+  for (const seg of segments) {
+    const range = document.createRange();
+    range.setStart(seg.node, seg.s);
+    range.setEnd(seg.node, seg.e);
+    const mark = document.createElement('mark');
+    mark.className = flash ? 'tw-comment tw-comment-flash' : 'tw-comment';
+    mark.setAttribute('data-thread', id);
+    try {
+      range.surroundContents(mark);
+    } catch {
+      continue; // a boundary we can't cleanly wrap — skip this fragment
+    }
+    if (!first) first = mark;
+  }
+  return first;
+}
+
+/** Insert a thin remote-cursor caret at a char index within `scope`. */
+function insertRemoteCursor(scope: HTMLElement, index: number, peer: PresencePeer): void {
+  const { nodes } = textNodesOf(scope);
+  const loc = locateCharIndex(nodes, index);
+  if (!loc) return;
+  const range = document.createRange();
+  range.setStart(loc.node, loc.offset);
+  range.collapse(true);
+  const caret = document.createElement('span');
+  caret.className = 'tw-remote-cursor';
+  caret.setAttribute('data-peer', peer.name);
+  if (peer.color) caret.style.setProperty('--tw-remote', peer.color);
+  const label = document.createElement('span');
+  label.className = 'tw-remote-flag';
+  label.textContent = peer.name;
+  caret.appendChild(label);
+  range.insertNode(caret);
+}
+
+/**
+ * Apply comment highlights + presence carets to the rendered content in
+ * `container`. Scoped per rendered block (`.tw-block[data-tw-from]`) when those
+ * exist (unified/preview), else treated as one whole-document scope (read mode).
+ */
+function applyDecorations(
+  container: HTMLElement,
+  source: string,
+  decorations: LiveDecoration[],
+  peers: PresencePeer[],
+  activeThreadId: string | undefined,
+): void {
+  clearDecorations(container);
+
+  const blockEls = Array.from(container.querySelectorAll<HTMLElement>('.tw-block[data-tw-from]'));
+  const scopes: { el: HTMLElement; from: number; to: number }[] =
+    blockEls.length > 0
+      ? blockEls.map((el) => ({
+          el,
+          from: Number(el.getAttribute('data-tw-from')) || 0,
+          to: Number(el.getAttribute('data-tw-to')) || 0,
+        }))
+      : [{ el: container, from: 0, to: source.length }];
+
+  let flashTarget: HTMLElement | null = null;
+
+  for (const scope of scopes) {
+    const scopeText = scope.el.textContent ?? '';
+    for (const dec of decorations) {
+      // Only decorate blocks the anchor overlaps.
+      if (dec.to <= scope.from || dec.from >= scope.to) continue;
+      const rawFrom = Math.max(dec.from, scope.from) - scope.from;
+      const rawTo = Math.min(dec.to, scope.to) - scope.from;
+      const rawSlice = source.slice(scope.from + rawFrom, scope.from + rawTo);
+      const target = plainify(rawSlice) || plainify(dec.quote);
+      if (!target) continue;
+      let at = scopeText.indexOf(target);
+      if (at < 0) at = scopeText.indexOf(dec.quote.trim());
+      if (at < 0) continue;
+      const mark = wrapCharRange(scope.el, at, at + target.length, dec.id, dec.id === activeThreadId);
+      if (mark && dec.id === activeThreadId) flashTarget = mark;
+    }
+    for (const peer of peers) {
+      const cur = peer.cursor;
+      if (!cur) continue;
+      if (cur.from < scope.from || cur.from > scope.to) continue;
+      const rendered = scope.el.textContent?.length ?? 0;
+      const idx = Math.min(Math.max(0, cur.from - scope.from), rendered);
+      insertRemoteCursor(scope.el, idx, peer);
+    }
+  }
+
+  if (flashTarget) flashTarget.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+/**
+ * The collaboration controller. Owns live anchors, optimistic threads, the
+ * selection popup/composer, and the sidebar/presence state; returns the pieces
+ * the editor stitches into each mode. Inert (all state idle) when neither
+ * comments nor presence is configured.
+ */
+interface CollabController {
+  commentsActive: boolean;
+  active: boolean;
+  /** Whether the comments sidebar is open (content is offset to make room). */
+  sidebarOpen: boolean;
+  peers: PresencePeer[];
+  threads: CommentThread[];
+  contentRef: React.RefObject<HTMLDivElement | null>;
+  /** Wrap a commit so anchors re-map through its change; call from commitValue. */
+  onCommit: (change: DocChange) => void;
+  /** Report a raw-source (textarea) selection for the Comment popup. */
+  onSourceSelect: (docFrom: number, docTo: number, quote: string) => void;
+  /** Track the pointer so the popup can anchor near a textarea selection. */
+  onPointer: (x: number, y: number) => void;
+  /** Chrome rendered inside the editor shell (popup, composer, bar, sidebar). */
+  overlay: React.ReactNode;
+}
+
+function useCollab(
+  comments: boolean | CommentsOptions | undefined,
+  presence: PresencePeer[] | undefined,
+  md: string,
+  mode: EditorMode,
+): CollabController {
+  const opts = normalizeComments(comments);
+  const commentsActive = !!opts && opts.enabled !== false;
+  const peers = React.useMemo(() => presence ?? [], [presence]);
+  const active = commentsActive || peers.length > 0;
+
+  const hostThreads = opts?.threads ?? EMPTY_THREADS;
+  const me = opts?.me;
+
+  const contentRef = React.useRef<HTMLDivElement | null>(null);
+  const pointerRef = React.useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const srcRef = React.useRef(md);
+  srcRef.current = md;
+
+  const [localThreads, setLocalThreads] = React.useState<CommentThread[]>([]);
+  const [liveAnchors, setLiveAnchors] = React.useState<Map<string, { from: number; to: number }>>(
+    () => new Map(),
+  );
+  const [open, setOpen] = React.useState(false);
+  const [activeThreadId, setActiveThreadId] = React.useState<string | undefined>(undefined);
+  const [pending, setPending] = React.useState<PendingSelection | null>(null);
+  const [composing, setComposing] = React.useState<PendingSelection | null>(null);
+
+  const threads = React.useMemo(() => mergeThreads(hostThreads, localThreads), [hostThreads, localThreads]);
+
+  // Seed / reconcile live anchors when the visible thread set changes: add new
+  // threads' anchors, drop removed ones, keep existing live positions.
+  React.useEffect(() => {
+    if (!commentsActive) return;
+    setLiveAnchors((prev) => {
+      const next = new Map(prev);
+      const valid = new Set(threads.map((t) => t.id));
+      for (const t of threads) if (!next.has(t.id)) next.set(t.id, t.anchor);
+      for (const id of [...next.keys()]) if (!valid.has(id)) next.delete(id);
+      return next;
+    });
+  }, [threads, commentsActive]);
+
+  // Every commit re-maps every live anchor through the change; fully-deleted
+  // anchors (mapAnchor → null) are dropped.
+  const commentsActiveRef = React.useRef(commentsActive);
+  commentsActiveRef.current = commentsActive;
+  const onCommit = React.useCallback((change: DocChange) => {
+    if (!commentsActiveRef.current) return;
+    // Minimize against the pre-commit document so anchors inside an untouched
+    // part of a whole-region replace (block commit / command apply) survive.
+    const minimal = minimizeChange(change, srcRef.current);
+    setLiveAnchors((prev) => {
+      const next = new Map<string, { from: number; to: number }>();
+      prev.forEach((a, id) => {
+        const mapped = mapAnchor(a, minimal);
+        if (mapped) next.set(id, mapped);
+      });
+      return next;
+    });
+  }, []);
+
+  const onPointer = React.useCallback((x: number, y: number) => {
+    pointerRef.current = { x, y };
+  }, []);
+
+  const onSourceSelect = React.useCallback(
+    (docFrom: number, docTo: number, quote: string) => {
+      if (!commentsActive || docFrom >= docTo || !quote.trim()) {
+        setPending(null);
+        return;
+      }
+      const { x, y } = pointerRef.current;
+      setPending({ anchor: { from: docFrom, to: docTo }, quote, x, y });
+    },
+    [commentsActive],
+  );
+
+  // Rendered-content selection (preview/read + unified rendered blocks): derive
+  // a document anchor from the nearest block's source range and the quote.
+  React.useEffect(() => {
+    if (!commentsActive) return undefined;
+    const onMouseUp = (e: MouseEvent) => {
+      pointerRef.current = { x: e.clientX, y: e.clientY };
+      const container = contentRef.current;
+      if (!container) return;
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+      const quote = sel.toString();
+      if (!quote.trim()) return;
+      const range = sel.getRangeAt(0);
+      const anchorNode = range.commonAncestorContainer;
+      if (!(anchorNode instanceof Node) || !container.contains(anchorNode)) return;
+      // Ignore selections inside our own chrome (composer/sidebar/popup).
+      const host = anchorNode instanceof Element ? anchorNode : anchorNode.parentElement;
+      if (host?.closest('.tw-selpop, .tw-composer, .tw-comments-sidebar')) return;
+
+      const blockEl = host?.closest<HTMLElement>('.tw-block[data-tw-from]');
+      const from = blockEl ? Number(blockEl.getAttribute('data-tw-from')) || 0 : 0;
+      const to = blockEl ? Number(blockEl.getAttribute('data-tw-to')) || 0 : srcRef.current.length;
+      const blockSrc = srcRef.current.slice(from, to);
+      const idx = blockSrc.indexOf(quote.trim());
+      const anchor =
+        idx >= 0
+          ? { from: from + idx, to: from + idx + quote.trim().length }
+          : { from, to };
+      const rect = range.getBoundingClientRect();
+      setPending({
+        anchor,
+        quote: quote.trim(),
+        x: rect.left + rect.width / 2,
+        y: rect.top,
+      });
+    };
+    document.addEventListener('mouseup', onMouseUp);
+    return () => document.removeEventListener('mouseup', onMouseUp);
+  }, [commentsActive]);
+
+  // Draw highlights + presence carets after every relevant change.
+  const decorations = React.useMemo<LiveDecoration[]>(() => {
+    if (!commentsActive) return [];
+    const out: LiveDecoration[] = [];
+    for (const t of threads) {
+      if (t.resolved) continue;
+      const pos = liveAnchors.get(t.id) ?? t.anchor;
+      out.push({ id: t.id, from: pos.from, to: pos.to, quote: t.quote ?? '' });
+    }
+    return out;
+  }, [threads, liveAnchors, commentsActive]);
+
+  React.useLayoutEffect(() => {
+    const container = contentRef.current;
+    if (!container || !active) return;
+    applyDecorations(container, md, decorations, peers, activeThreadId);
+  }, [md, decorations, peers, activeThreadId, active, mode]);
+
+  // Clicking a highlight opens its thread in the sidebar.
+  React.useEffect(() => {
+    const container = contentRef.current;
+    if (!container || !commentsActive) return undefined;
+    const onClick = (e: MouseEvent) => {
+      const mark = (e.target as HTMLElement | null)?.closest?.('mark.tw-comment');
+      const id = mark?.getAttribute('data-thread');
+      if (!id) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setActiveThreadId(id);
+      setOpen(true);
+    };
+    container.addEventListener('click', onClick, true);
+    return () => container.removeEventListener('click', onClick, true);
+  }, [commentsActive]);
+
+  const createThread = React.useCallback(
+    (sel: PendingSelection, body: string) => {
+      const id = `tw-comment-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      opts?.onCreate?.({ anchor: sel.anchor, quote: sel.quote, body });
+      const thread: CommentThread = {
+        id,
+        anchor: sel.anchor,
+        quote: sel.quote,
+        author: me?.name ?? 'You',
+        body,
+        createdAt: new Date().toISOString(),
+        replies: [],
+      };
+      setLocalThreads((prev) => [...prev, thread]);
+      setLiveAnchors((prev) => new Map(prev).set(id, sel.anchor));
+      setActiveThreadId(id);
+      setOpen(true);
+      setComposing(null);
+      setPending(null);
+      window.getSelection()?.removeAllRanges();
+    },
+    [opts, me],
+  );
+
+  const overlay = active ? (
+    <>
+      {(peers.length > 0 || commentsActive) && (
+        <div className="tw-collab-bar">
+          {peers.length > 0 && (
+            <div className="tw-presence" aria-label="Collaborators">
+              {peers.map((p) => (
+                <span
+                  key={p.id}
+                  className="tw-presence-av"
+                  style={{ background: p.color ?? '#888' }}
+                  title={p.name}
+                  aria-label={p.name}
+                >
+                  {peerInitials(p.name)}
+                </span>
+              ))}
+            </div>
+          )}
+          {commentsActive && (
+            <button
+              type="button"
+              className={`tw-comments-toggle${open ? ' tw-on' : ''}`}
+              aria-label={open ? 'Hide comments' : 'Show comments'}
+              aria-expanded={open}
+              onClick={() => setOpen((o) => !o)}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+              </svg>
+              <span className="tw-comments-toggle-n">{threads.length}</span>
+            </button>
+          )}
+        </div>
+      )}
+
+      {commentsActive && pending && !composing && (
+        <div className="tw-selpop show" style={{ left: clampX(pending.x), top: Math.max(8, pending.y - 44) }} role="menu">
+          <button
+            type="button"
+            className="tw-selpop-btn"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              setComposing(pending);
+              setPending(null);
+            }}
+          >
+            💬 Comment
+          </button>
+        </div>
+      )}
+
+      {commentsActive && composing && (
+        <Composer
+          selection={composing}
+          onSubmit={(body) => createThread(composing, body)}
+          onCancel={() => {
+            setComposing(null);
+            window.getSelection()?.removeAllRanges();
+          }}
+        />
+      )}
+
+      {commentsActive && (
+        <CommentsSidebar
+          threads={threads}
+          me={me}
+          open={open}
+          onClose={() => setOpen(false)}
+          onReply={(threadId, body) => opts?.onReply?.(threadId, body)}
+          onReact={(threadId, emoji) => opts?.onReact?.(threadId, emoji)}
+          onResolve={(threadId, resolved) => opts?.onResolve?.(threadId, resolved)}
+          onDelete={opts?.onDelete ? (threadId) => opts?.onDelete?.(threadId) : undefined}
+          activeThreadId={activeThreadId}
+          onSelectThread={(threadId) => setActiveThreadId(threadId)}
+        />
+      )}
+    </>
+  ) : null;
+
+  return {
+    commentsActive,
+    active,
+    sidebarOpen: open && commentsActive,
+    peers,
+    threads,
+    contentRef,
+    onCommit,
+    onSourceSelect,
+    onPointer,
+    overlay,
+  };
+}
+
+const EMPTY_THREADS: CommentThread[] = [];
+
+/** Clamp a fixed-position x so a popup/composer stays on screen. */
+function clampX(x: number): number {
+  const w = typeof window === 'undefined' ? 1024 : window.innerWidth;
+  return Math.max(8, Math.min(x, w - 288));
+}
+
+/** The comment composer: quoted selection + a body textarea + submit/cancel. */
+function Composer(props: {
+  selection: PendingSelection;
+  onSubmit: (body: string) => void;
+  onCancel: () => void;
+}): React.ReactElement {
+  const { selection, onSubmit, onCancel } = props;
+  const [body, setBody] = React.useState('');
+  const taRef = React.useRef<HTMLTextAreaElement>(null);
+  React.useEffect(() => {
+    taRef.current?.focus();
+  }, []);
+  const submit = () => {
+    const v = body.trim();
+    if (v) onSubmit(v);
+  };
+  return (
+    <div
+      className="tw-composer show"
+      style={{ left: clampX(selection.x), top: Math.max(8, selection.y - 8) }}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <div className="tw-composer-quote">“{selection.quote}”</div>
+      <textarea
+        ref={taRef}
+        value={body}
+        placeholder="Add a comment…"
+        aria-label="Comment"
+        onChange={(e) => setBody(e.currentTarget.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            onCancel();
+          } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            submit();
+          }
+        }}
+      />
+      <div className="tw-composer-row">
+        <button type="button" className="tw-composer-btn" onClick={onCancel}>
+          Cancel
+        </button>
+        <button type="button" className="tw-composer-btn tw-composer-primary" disabled={!body.trim()} onClick={submit}>
+          Comment
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, TypewrightEditorProps>(
   function TypewrightEditor(props, forwardedRef): React.ReactElement {
     useInjectStyles();
@@ -161,6 +776,8 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
       extensions,
       folding,
       keymap,
+      comments,
+      presence,
       readOnly = false,
       placeholder = 'Write Markdown…',
       theme,
@@ -210,12 +827,18 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
     const mdRef = React.useRef(md);
     mdRef.current = md;
 
+    // Collaboration controller (comments + presence). Inert unless the host
+    // passes `comments`/`presence`, so default rendering is unchanged.
+    const collab = useCollab(comments, presence, md, mode);
+    const { onCommit } = collab;
+
     const commitValue = React.useCallback(
       (next: string, change: DocChange) => {
         if (!isControlled) setInternal(next);
         onChange?.(next, change);
+        onCommit(change); // re-map comment anchors through this edit
       },
-      [isControlled, onChange],
+      [isControlled, onChange, onCommit],
     );
 
     // The focused source textarea registers itself so toolbar commands + the
@@ -244,8 +867,26 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
     const showToolbar = !!toolbar && !readOnly && (mode === 'edit' || mode === 'unified');
     const toolbarEl = showToolbar ? <Toolbar mode={toolbarMode} onCommand={applyCmd} /> : null;
 
+    // When comments/presence are active, the editor content is wrapped in a
+    // positioned shell that also hosts the selection popup, composer, presence
+    // bar, and comments sidebar. Inactive → the content renders exactly as before.
+    const shellClass = [
+      'tw-editor-shell',
+      appearance !== 'auto' ? `tw-theme-${appearance}` : '',
+      collab.sidebarOpen ? 'tw-comments-open' : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+    const shell = (content: React.ReactElement): React.ReactElement =>
+      collab.active ? (
+        <div className={shellClass} onMouseUp={(e) => collab.onPointer(e.clientX, e.clientY)}>
+          {content}
+          {collab.overlay}
+        </div>
+      ) : content;
+
     if (mode === 'edit') {
-      return (
+      return shell(
         <div className={rootClass} style={style} data-typewright="edit">
           {toolbarEl}
           <SourceArea
@@ -256,27 +897,30 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
             onSelect={onSelectionChange}
             register={register}
             bindings={keymapBindings}
+            commentBase={collab.commentsActive ? 0 : undefined}
+            onCommentSelect={collab.commentsActive ? collab.onSourceSelect : undefined}
             full
           />
-        </div>
+        </div>,
       );
     }
 
     if (mode === 'read') {
       const html = renderToHtml(parse(md, parseOpts), renderOpts);
-      return (
+      return shell(
         <div
           className={rootClass}
           style={style}
           data-typewright="read"
+          ref={collab.active ? collab.contentRef : undefined}
           // sanitized by render.ts
           dangerouslySetInnerHTML={{ __html: html || `<p class="tw-placeholder">${escapeText(placeholder)}</p>` }}
-        />
+        />,
       );
     }
 
     // unified + preview: editable block-level rich preview
-    return (
+    return shell(
       <UnifiedEditor
         md={md}
         mdRef={mdRef}
@@ -293,7 +937,10 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
         parseOpts={parseOpts}
         renderOpts={renderOpts}
         bindings={keymapBindings}
-      />
+        contentRef={collab.active ? collab.contentRef : undefined}
+        commentsActive={collab.commentsActive}
+        onCommentSelect={collab.commentsActive ? collab.onSourceSelect : undefined}
+      />,
     );
   },
 );
@@ -375,10 +1022,16 @@ interface UnifiedProps {
   parseOpts: ParseOptions;
   renderOpts: RenderOptions;
   bindings: Map<string, Command>;
+  /** Ref the collab layer walks for comment highlights + presence carets. */
+  contentRef?: React.RefObject<HTMLDivElement | null>;
+  /** Whether comments are active (enables selection-to-comment on blocks). */
+  commentsActive?: boolean;
+  /** Report a raw-source selection (document offsets) for the Comment popup. */
+  onCommentSelect?: (docFrom: number, docTo: number, quote: string) => void;
 }
 
 function UnifiedEditor(props: UnifiedProps): React.ReactElement {
-  const { md, mdRef, rootClass, style, readOnly, placeholder, foldingEnabled, showGutter, persistKey, commitValue, register, toolbar, parseOpts, renderOpts, bindings } = props;
+  const { md, mdRef, rootClass, style, readOnly, placeholder, foldingEnabled, showGutter, persistKey, commitValue, register, toolbar, parseOpts, renderOpts, bindings, contentRef, commentsActive, onCommentSelect } = props;
   const [active, setActive] = React.useState<number | null>(null);
   const [draft, setDraft] = React.useState('');
   // Seed the folded set from persisted heading keys (re-anchored to the current
@@ -572,7 +1225,7 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
 
   if (readOnly && !md.trim()) {
     return (
-      <div className={rootClass} style={style} data-typewright="unified">
+      <div className={rootClass} style={style} data-typewright="unified" ref={contentRef}>
         <p className="tw-placeholder">{placeholder}</p>
       </div>
     );
@@ -581,7 +1234,7 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
   // until they blur, then fall back to the block-rendered view.
   if (!md.trim() || typing) {
     return (
-      <div className={rootClass} style={style} data-typewright="unified">
+      <div className={rootClass} style={style} data-typewright="unified" ref={contentRef}>
         {toolbar}
         <SourceArea
           value={md}
@@ -589,6 +1242,8 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
           placeholder={placeholder}
           register={register}
           bindings={bindings}
+          commentBase={commentsActive ? 0 : undefined}
+          onCommentSelect={commentsActive ? onCommentSelect : undefined}
           onFocus={() => setTyping(true)}
           onBlur={() => setTyping(false)}
           onChange={(next, change) => commitValue(next, change)}
@@ -598,7 +1253,7 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
   }
 
   return (
-    <div className={rootClass} style={style} data-typewright="unified">
+    <div className={rootClass} style={style} data-typewright="unified" ref={contentRef}>
       {toolbar}
       {blocks.map((b, i) => {
         if (hidden.has(i)) return null;
@@ -668,6 +1323,8 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
                 autoFocus
                 register={register}
                 bindings={bindings}
+                commentBase={commentsActive ? b.from : undefined}
+                onCommentSelect={commentsActive ? onCommentSelect : undefined}
                 onChange={(next) => setDraft(next)}
                 onBlur={() => { captureFlip(); commit(); }}
                 onEscape={() => { captureFlip(); commit(); }}
@@ -681,9 +1338,21 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
                 className="tw-block"
                 role={readOnly ? undefined : 'button'}
                 tabIndex={readOnly ? undefined : 0}
+                data-tw-from={b.from}
+                data-tw-to={b.to}
                 onMouseDown={(e) => {
                   if (readOnly) return;
+                  // When comments are active, let the browser start a native
+                  // selection (drag → Comment popup); a plain click still
+                  // reveals the source (handled in onClick below).
+                  if (commentsActive) return;
                   e.preventDefault();
+                  activate(b.from);
+                }}
+                onClick={() => {
+                  if (readOnly || !commentsActive) return;
+                  const sel = window.getSelection();
+                  if (sel && !sel.isCollapsed && sel.toString().trim()) return; // drag-select → comment
                   activate(b.from);
                 }}
                 onKeyDown={(e) => {
@@ -810,10 +1479,14 @@ interface SourceAreaProps {
   register?: (api: ActiveSource | null) => void;
   /** Active keyboard shortcuts (canonical binding → command). */
   bindings?: Map<string, Command>;
+  /** Document offset this textarea's local offset 0 maps to (for comment anchors). */
+  commentBase?: number;
+  /** Report a non-empty selection (document offsets) for the Comment popup. */
+  onCommentSelect?: (docFrom: number, docTo: number, quote: string) => void;
 }
 
 function SourceArea(props: SourceAreaProps): React.ReactElement {
-  const { value, onChange, onBlur, onEscape, onFocus, onSelect, autoFocus, readOnly, placeholder, full, register, bindings } = props;
+  const { value, onChange, onBlur, onEscape, onFocus, onSelect, autoFocus, readOnly, placeholder, full, register, bindings, commentBase, onCommentSelect } = props;
   const ref = React.useRef<HTMLTextAreaElement>(null);
   const pendingSel = React.useRef<[number, number] | null>(null);
 
@@ -868,7 +1541,12 @@ function SourceArea(props: SourceAreaProps): React.ReactElement {
       }}
       onSelect={(e) => {
         const el = e.currentTarget;
-        onSelect?.({ main: { from: el.selectionStart, to: el.selectionEnd }, ranges: [{ from: el.selectionStart, to: el.selectionEnd }] });
+        const from = el.selectionStart;
+        const to = el.selectionEnd;
+        onSelect?.({ main: { from, to }, ranges: [{ from, to }] });
+        if (onCommentSelect && commentBase !== undefined && from !== to) {
+          onCommentSelect(commentBase + from, commentBase + to, el.value.slice(from, to));
+        }
       }}
       onKeyDown={(e) => {
         if (e.key === 'Escape' && onEscape) {
@@ -957,4 +1635,46 @@ const TYPEWRIGHT_CSS = `
 .tw-editor .tw-footnotes{border-top:1px solid var(--tw-line); margin-top:1.4em; padding-top:.6em; font-size:.9em; color:var(--tw-muted)}
 .tw-editor .tw-fnref{font-size:.82em} .tw-editor .tw-fnref a{color:var(--tw-accent); border-bottom:0} .tw-editor .tw-fn-back{color:var(--tw-accent); border-bottom:0; margin-left:4px; text-decoration:none}
 .tw-editor dl{margin:.5em 0} .tw-editor dt{font-weight:680; margin-top:.4em} .tw-editor dd{margin:.15em 0 .35em 1.4em; color:var(--tw-muted)}
+/* ---- Collaboration: shell, comment highlights, presence, popup, composer ---- */
+.tw-editor-shell{ --tw-fg:#1a1d20; --tw-muted:#5a6169; --tw-faint:#8b929a; --tw-bg:#ffffff; --tw-chip:#f0f1f3; --tw-line:rgba(18,22,27,.1); --tw-accent:#2f6fed; --tw-accent-soft:rgba(47,111,237,.1); --tw-code-bg:#f6f7f9; position:relative; font-family:-apple-system,"SF Pro Text",system-ui,sans-serif }
+@media (prefers-color-scheme: dark){ .tw-editor-shell:not(.tw-theme-light){ --tw-fg:#e8eaed; --tw-muted:#a3abb2; --tw-faint:#6a727a; --tw-bg:#0f1215; --tw-chip:#1e242b; --tw-line:rgba(255,255,255,.1); --tw-accent:#6ea3ff; --tw-accent-soft:rgba(110,163,255,.14); --tw-code-bg:#13171b } }
+.tw-editor-shell.tw-theme-dark{ --tw-fg:#e8eaed; --tw-muted:#a3abb2; --tw-faint:#6a727a; --tw-bg:#0f1215; --tw-chip:#1e242b; --tw-line:rgba(255,255,255,.1); --tw-accent:#6ea3ff; --tw-accent-soft:rgba(110,163,255,.14); --tw-code-bg:#13171b }
+.tw-editor-shell.tw-comments-open>.tw-editor{margin-right:min(340px,82vw); transition:margin .26s cubic-bezier(.32,.72,0,1)}
+.tw-collab-bar{position:absolute; top:8px; right:10px; z-index:22; display:flex; align-items:center; gap:8px; pointer-events:none}
+.tw-collab-bar>*{pointer-events:auto}
+.tw-presence{display:flex; align-items:center}
+.tw-presence-av{width:26px; height:26px; border-radius:50%; display:grid; place-items:center; font-size:11px; font-weight:640; color:#0b0d0f; border:2px solid var(--tw-bg); margin-left:-7px; box-shadow:0 1px 3px rgba(0,0,0,.3)}
+.tw-presence-av:first-child{margin-left:0}
+.tw-comments-toggle{display:inline-flex; align-items:center; gap:6px; height:28px; padding:0 9px; border:1px solid var(--tw-line); border-radius:9px; background:color-mix(in srgb, var(--tw-bg) 82%, transparent); backdrop-filter:blur(16px) saturate(1.5); -webkit-backdrop-filter:blur(16px) saturate(1.5); color:var(--tw-muted); font:inherit; font-size:12.5px; cursor:pointer; transition:color .15s, border-color .15s, background .15s}
+.tw-comments-toggle:hover{color:var(--tw-fg); border-color:var(--tw-accent)}
+.tw-comments-toggle.tw-on{color:var(--tw-accent); border-color:var(--tw-accent); background:var(--tw-accent-soft)}
+.tw-comments-toggle:focus-visible{outline:2px solid var(--tw-accent); outline-offset:2px}
+.tw-comments-toggle svg{width:15px; height:15px; flex:none}
+.tw-comments-toggle-n{font-variant-numeric:tabular-nums; font-size:11px; font-weight:640; background:var(--tw-chip); border-radius:999px; padding:0 6px; line-height:1.6}
+.tw-comment{background:var(--tw-accent-soft); border-bottom:2px solid var(--tw-accent); border-radius:3px; padding:0 1px; cursor:pointer}
+.tw-comment:hover{background:color-mix(in srgb, var(--tw-accent) 24%, transparent)}
+@keyframes tw-comment-hl-flash{0%,100%{background:var(--tw-accent-soft)} 25%,70%{background:color-mix(in srgb, var(--tw-accent) 38%, transparent)}}
+.tw-comment-flash{animation:tw-comment-hl-flash 1.4s ease}
+.tw-remote-cursor{position:relative; display:inline-block; width:0; border-left:2px solid var(--tw-remote, var(--tw-accent)); margin:0 -1px; vertical-align:text-bottom; height:1.05em}
+.tw-remote-flag{position:absolute; top:-1.15em; left:-1px; white-space:nowrap; font-size:9.5px; line-height:1.3; font-weight:640; color:#0b0d0f; background:var(--tw-remote, var(--tw-accent)); border-radius:4px 4px 4px 0; padding:0 4px; opacity:0; transform:translateY(2px); transition:opacity .15s, transform .15s; pointer-events:none}
+.tw-remote-cursor:hover .tw-remote-flag{opacity:1; transform:none}
+.tw-selpop{position:fixed; z-index:120; display:flex; align-items:center; gap:3px; padding:4px; background:color-mix(in srgb, var(--tw-bg) 86%, transparent); backdrop-filter:blur(22px) saturate(1.7); -webkit-backdrop-filter:blur(22px) saturate(1.7); border:1px solid var(--tw-line); border-radius:11px; box-shadow:0 12px 34px -10px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.06); opacity:0; transform:translateY(4px); transition:opacity .14s, transform .14s cubic-bezier(.32,.72,0,1)}
+.tw-selpop.show{opacity:1; transform:none}
+.tw-selpop-btn{height:27px; padding:0 10px; border:0; border-radius:8px; background:transparent; color:var(--tw-accent); font:inherit; font-size:12.5px; font-weight:560; cursor:pointer; white-space:nowrap}
+.tw-selpop-btn:hover{background:var(--tw-accent-soft)}
+.tw-composer{position:fixed; z-index:121; width:268px; padding:10px; background:color-mix(in srgb, var(--tw-bg) 90%, transparent); backdrop-filter:blur(22px) saturate(1.7); -webkit-backdrop-filter:blur(22px) saturate(1.7); border:1px solid var(--tw-line); border-radius:13px; box-shadow:0 20px 48px -12px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.06); color:var(--tw-fg); opacity:0; transform:translateY(6px) scale(.98); transition:opacity .16s, transform .16s cubic-bezier(.32,.72,0,1)}
+.tw-composer.show{opacity:1; transform:none}
+.tw-composer-quote{font-size:11.5px; color:var(--tw-muted); font-style:italic; border-left:2px solid var(--tw-accent-soft); padding-left:7px; margin-bottom:8px; overflow-wrap:anywhere}
+.tw-composer textarea{width:100%; box-sizing:border-box; height:62px; resize:none; background:var(--tw-bg); border:1px solid var(--tw-line); border-radius:9px; padding:8px 9px; font:inherit; font-size:13px; color:var(--tw-fg); outline:none; transition:border-color .15s}
+.tw-composer textarea:focus{border-color:var(--tw-accent)}
+.tw-composer textarea::placeholder{color:var(--tw-faint)}
+.tw-composer-row{display:flex; justify-content:flex-end; gap:6px; margin-top:8px}
+.tw-composer-btn{border:1px solid var(--tw-line); background:var(--tw-chip); color:var(--tw-muted); border-radius:8px; padding:5px 11px; font:inherit; font-size:12px; cursor:pointer; transition:color .15s, border-color .15s, background .15s}
+.tw-composer-btn:hover{color:var(--tw-fg); border-color:var(--tw-accent)}
+.tw-composer-btn:focus-visible{outline:2px solid var(--tw-accent); outline-offset:2px}
+.tw-composer-primary{background:var(--tw-accent); border-color:var(--tw-accent); color:#fff}
+.tw-composer-primary:hover{color:#fff; filter:brightness(1.06)}
+.tw-composer-btn:disabled{opacity:.5; cursor:default}
+@media (prefers-reduced-transparency: reduce){ .tw-selpop,.tw-composer,.tw-comments-toggle{backdrop-filter:none; -webkit-backdrop-filter:none; background:var(--tw-bg)} }
+@media (prefers-reduced-motion: reduce){ .tw-selpop,.tw-composer,.tw-comment-flash,.tw-editor-shell.tw-comments-open>.tw-editor{animation:none !important; transition:none !important} }
 `;
