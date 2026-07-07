@@ -297,7 +297,24 @@ export function createSandbox(opts: CreateSandboxOptions = {}): SandboxControlle
     if (!win) return;
     while (outbox.length > 0) {
       const msg = outbox.shift();
-      if (msg) win.postMessage(msg, '*');
+      if (!msg) continue;
+      try {
+        win.postMessage(msg, '*');
+      } catch {
+        // A non-structured-cloneable payload (e.g. a function passed in
+        // MdxOptions.components — functions can't cross the postMessage
+        // boundary into the opaque-origin frame) throws DataCloneError here.
+        // Fail the matching request fast with a clear message instead of
+        // letting it hang until the timeout.
+        const id = msg.id;
+        if (typeof id === 'number') {
+          settle(id, {
+            error:
+              'sandbox payload is not serializable — MDX components/props must be ' +
+              'structured-cloneable (functions are not supported across the sandbox)',
+          });
+        }
+      }
     }
   }
 

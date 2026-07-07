@@ -316,4 +316,24 @@ describe('createSandbox', () => {
       error: 'sandbox destroyed',
     });
   });
+
+  it('fails fast with a clear error when postMessage throws (never hangs)', async () => {
+    // A non-structured-cloneable payload (e.g. a function in the component map)
+    // makes the browser's postMessage throw DataCloneError. jsdom does not
+    // clone-validate, so we force the throw to exercise flush()'s guard: it
+    // must settle the request with a clear error, not hang until the timeout.
+    const controller = createSandbox({ timeoutMs: 300 });
+    const iframe = currentIframe();
+    const token = tokenOf(iframe);
+    const source = iframe.contentWindow!;
+    vi.spyOn(source, 'postMessage').mockImplementation(() => {
+      throw new DOMException('could not be cloned', 'DataCloneError');
+    });
+    // Simulate the frame signalling ready so the outbox flushes.
+    window.dispatchEvent(new MessageEvent('message', { data: { token, type: 'ready' }, source }));
+    const result = await controller.evaluate('return null;', {
+      components: { X: () => null },
+    });
+    expect(result.error).toMatch(/not serializable/i);
+  });
 });
