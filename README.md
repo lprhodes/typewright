@@ -8,22 +8,32 @@ Zero-runtime-dependency engine · Obsidian-style unified live preview · semanti
 
 [![npm](https://img.shields.io/badge/npm-typewright-cb3837)](https://www.npmjs.com/package/typewright)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
-[![status](https://img.shields.io/badge/status-pre--alpha-orange)](./SPEC.md)
+[![status](https://img.shields.io/badge/status-alpha-orange)](./SPEC.md)
 
 </div>
 
 > [!NOTE]
-> **Alpha (v0.1.0).** The core engine is real and tested: a from-scratch,
-> zero-runtime-dependency GFM parser → offset-exact AST → **sanitizing** HTML
-> renderer, unified-mode + fold services, and a streaming **anticipation**
-> renderer — all wired into working `<TypewrightEditor>` and `<StreamingPreview>`
-> components (129 unit tests + 9 Playwright e2e; an independent adversarial
-> security/correctness review passed after fixes). Still **deferred** (see
-> [SPEC.md §15](./SPEC.md#15-roadmap)) and represented in the interactive
-> [`demo/`](./demo/index.html): character-level inline marker reveal, custom
-> virtualization + full IME, MDX JSX **sandbox execution**, Mermaid, the in-place
-> table WYSIWYG grid, and comments/collaboration. The public API (`src/types.ts`)
-> is stable and semver-versioned.
+> **Alpha (v0.2.0).** The engine is real and tested: a from-scratch,
+> zero-runtime-dependency GFM+MDX parser → offset-exact AST → **sanitizing** HTML
+> renderer, an **incremental reparse**, unified-mode + fold services, and a
+> streaming **anticipation** renderer — all wired into working
+> `<TypewrightEditor>` and `<StreamingPreview>` components (extensive unit +
+> Playwright e2e coverage; an independent adversarial security/correctness review
+> passed after fixes). **v0.2 lights up the surfaces v0.1 deferred:** comments &
+> presence, a settings panel + **⌘K command palette**, native **syntax
+> colouring**, **sandboxed MDX execution** (opaque-origin iframe), **Mermaid +
+> math** engine hooks, the **in-place table grid**, the **fold menu**, **footnotes
+> + definition lists**, streaming link/list/table **anticipation + smoothing**,
+> and **threshold-gated virtualization** — with a reproducible **benchmark
+> harness** ([docs/BENCHMARKS.md](./docs/BENCHMARKS.md)) and a gzip **size budget**.
+>
+> **Two things are honestly not done yet** (see [FEATURES.md](./docs/FEATURES.md)):
+> (1) unified mode reveals raw Markdown at the **block** level (click-to-edit),
+> not yet the Obsidian-exact **per-caret** reveal; and (2) editing uses native
+> `<textarea>` surfaces — which handle **IME/composition correctly** — rather than
+> the SPEC §4.4 **custom hidden-sink** input substrate. The custom sink is the
+> prerequisite for per-caret reveal, and both remain roadmap. The public API
+> (`src/types.ts`) is stable and semver-versioned.
 
 ---
 
@@ -38,7 +48,7 @@ The result is designed to win where it matters: **keystroke-to-paint latency on 
 ## Highlights
 
 - ⚡ **From-scratch, zero-runtime-dependency engine.** String-is-state model, viewport-virtualized DOM rendering, hand-written incremental block parser with exact source offsets.
-- 👁 **Unified source-revealing mode.** Formatting renders inline; the raw Markdown (`**`, `` ` ``, `#`) is revealed only around your caret — the Obsidian "Live Preview" idiom, native rather than bolted on.
+- 👁 **Unified source-revealing mode.** Formatting renders inline; click any block to reveal and edit its raw Markdown (`**`, `` ` ``, `#`) in place, then blur to re-render — the Obsidian "Live Preview" idiom, native rather than bolted on. (Per-**caret** marker reveal is the next step on this — see [FEATURES.md](./docs/FEATURES.md).)
 - 🧩 **Full GFM + MDX v3.** Tables, task lists, strikethrough, autolinks, footnotes; MDX JSX, ESM `import`/`export`, and `{expressions}`.
 - 🌊 **Streaming preview with formatting anticipation.** Feed it an LLM token stream and it renders word-by-word while *predicting* incomplete formatting — a partial `*bo` shows as in-progress bold, an unterminated fence opens a code block, partial JSX renders a component skeleton. ([demo pattern](https://elements.ai-sdk.dev/components/jsx-preview))
 - 📁 **Semantic heading folding.** Fold a section and everything under it collapses to the next same-or-higher heading, with an H1–H6 fold menu and fold/unfold-all.
@@ -106,10 +116,18 @@ await pipeStream(llmTextStream, controller);
 
 ### Headless (no React)
 
-```ts
-import { EditorView } from 'typewright/core';
+The zero-dependency core parses, renders (sanitized), and reparses incrementally — no DOM required, so it runs in Node too:
 
-const view = new EditorView({ parent: el, value: '# Doc', mode: 'unified' });
+```ts
+import { parse, renderToHtml, parseIncremental } from 'typewright/core';
+
+const src = '# Doc\n\nType **markdown** here.';
+const doc = parse(src);
+const html = renderToHtml(doc);            // sanitized HTML string
+
+// a single-keystroke edit reparses by reusing the block prefix:
+const next = src + '!';
+const doc2 = parseIncremental(doc, src, { from: src.length, to: src.length, insert: '!' }, next);
 ```
 
 ## Configuration
@@ -128,14 +146,14 @@ const view = new EditorView({ parent: el, value: '# Doc', mode: 'unified' });
 
 ## Status & roadmap
 
-Typewright is being built spec-first. See **[SPEC.md](./SPEC.md)** for the architecture and **[SPEC.md §15](./SPEC.md#15-roadmap)** for the phased roadmap. Broadly:
+Typewright is being built spec-first. See **[SPEC.md](./SPEC.md)** for the architecture, **[docs/FEATURES.md](./docs/FEATURES.md)** for the honest per-feature status, and **[docs/BENCHMARKS.md](./docs/BENCHMARKS.md)** for measured performance. Broadly, as of **v0.2**:
 
-1. **Foundation** — document model, incremental GFM block parser, virtualized view.
-2. **Unified mode** — decoration culling, standard keybindings, folding.
-3. **Rich editing** — tables, syntax highlighting, Mermaid, math.
-4. **MDX** — markup parser, wasm transform boundary, sandboxed execution.
-5. **Streaming** — the anticipation engine + partial JSX.
-6. **Hardening** — a11y, IME, benchmarks, collaboration-readiness.
+1. ✅ **Foundation** — document model, incremental GFM block parser, threshold-gated virtualized view.
+2. ✅ **Unified mode** — decoration culling, rebindable keybindings + ⌘K palette, folding + fold menu.
+3. ✅ **Rich editing** — in-place tables, native syntax highlighting, Mermaid, math (engines host-supplied).
+4. ✅ **MDX** — markup parser, wasm transform boundary, sandboxed execution.
+5. ✅ **Streaming** — the anticipation engine (links/lists/tables/smoothing) + partial JSX.
+6. 🟡 **Hardening** — comments/presence, benchmarks and gzip size budget shipped; **remaining:** the SPEC §4.4 custom input substrate (native textareas handle IME today), per-caret marker reveal, reparse-span tightening for mid-doc 1 MB edits, and the published CodeMirror-6 baseline + full axe-core sweep (harnesses exist; see BENCHMARKS.md).
 
 ## Contributing
 

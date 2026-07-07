@@ -1,6 +1,6 @@
 {
   "name": "typewright",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A blazing-fast, from-scratch GitHub Flavored Markdown + MDX editor and streaming previewer for the web. Zero-runtime-dependency engine, Obsidian-style unified live preview, semantic folding, in-place tables, and LLM token-stream rendering that anticipates formatting as it arrives.",
   "type": "module",
   "license": "MIT",
@@ -74,8 +74,11 @@
     "demo": "vite",
     "demo:build": "vite build && cp demo/dist/index.html demo/standalone.html",
     "e2e": "playwright test",
+    "bench": "vitest bench --run bench/",
+    "size": "tsup && node --experimental-strip-types bench/size.ts",
     "prepublishOnly": "pnpm run build"
   },
+  "//bench": "The CodeMirror-6 / Lezer baseline column in docs/BENCHMARKS.md is opt-in and NEVER shipped. To populate it locally: `pnpm add -D @lezer/markdown @lezer/common` (pure-parse baseline, node) and/or `pnpm add -D codemirror @codemirror/lang-markdown` (in-browser keystroke-to-paint, see bench/keystroke.md). Keep these in devDependencies only. `pnpm bench` runs without them (the baseline stub skips).",
   "peerDependencies": {
     "react": ">=18",
     "react-dom": ">=18",

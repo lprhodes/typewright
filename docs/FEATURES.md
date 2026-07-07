@@ -14,23 +14,25 @@ built) and [spec-TW-0001.md](./specs/spec-TW-0001.md) (the feature spec).
 |---|---|---|
 | **Modes** | Edit · Unified · Preview (editable) · Read | ✅ |
 | **Markdown** | Full CommonMark + GFM (tables, task lists, strikethrough, autolinks) | ✅ |
-| | Footnotes · definition lists | 🔜 |
-| **MDX** | Markup recognized (JSX / ESM / expressions) | 🟡 |
-| | Component **execution** (sandboxed) | 🔜 |
+| | Footnotes · definition lists | ✅ |
+| **MDX** | Markup recognized (JSX / ESM / expressions) | ✅ |
+| | Component **execution** (sandboxed iframe) | ✅ |
 | **Live preview** | Unified block-level editing (click to reveal source) | ✅ |
-| | Character-level inline marker reveal (Obsidian-exact) | 🔜 |
+| | Character-level inline marker reveal (Obsidian-exact, per-caret) | 🟡 |
 | **Toolbar** | Built-in formatting toolbar (docked / floating) + command engine | ✅ |
-| **Keyboard** | Standard text-editing shortcuts | ✅ |
+| **Keyboard** | Standard text-editing shortcuts + rebindable keymap + ⌘K palette | ✅ |
+| | Custom IME input substrate (SPEC §4.4 hidden sink) | 🟡 |
 | **Folding** | Semantic heading section folding | ✅ |
-| | Fold menu (set H1–H6, fold-all) | 🔜 |
+| | Fold menu (set H1–H6, fold-all, copy-link) + `persistKey` | ✅ |
 | **Tables** | GFM table parse + render + source edit | ✅ |
-| | In-place WYSIWYG grid editing | 🔜 |
-| **Streaming** | LLM token-stream preview with formatting anticipation | ✅ |
-| **Diagrams / math** | Mermaid · KaTeX rendering | 🔜 |
+| | In-place WYSIWYG grid editing | ✅ |
+| **Streaming** | LLM token-stream preview with formatting anticipation (links · lists · tables · smooth) | ✅ |
+| **Diagrams / math** | Mermaid · KaTeX rendering (host-supplied engines, sandboxed) | ✅ |
 | **Code** | Fenced code blocks | ✅ |
-| | Syntax **colouring** of rendered code | 🔜 |
-| **Collaboration** | Comments, presence, cursors | 🔜 |
-| **Settings** | Built-in settings / command-palette surface | 🔜 |
+| | Syntax **colouring** of rendered code (native, zero-dep) | ✅ |
+| **Collaboration** | Comments, presence, cursors | ✅ |
+| **Settings** | Built-in settings / command-palette surface | ✅ |
+| **Performance** | Incremental reparse · benchmark harness · gzip size budget | ✅ |
 | **Theming** | Light / dark / auto + CSS-variable tokens | ✅ |
 | **Security** | Sanitizing renderer (XSS-safe), Electron-safe execution model | ✅ |
 | **Packaging** | Drop-in React component · headless core · zero runtime deps | ✅ |
@@ -48,6 +50,8 @@ One editor, four modes (the `mode` prop), all over the same Markdown string (the
 
 Controlled (`value` + `onChange`) or uncontrolled (`defaultValue`). Emits `onChange(value, change)` and `onSelectionChange(selection)`.
 
+> 🟡 **Honest status — marker reveal granularity.** Unified mode today reveals raw Markdown at the **block** level (click a block → its source appears in an inline editor). The Obsidian-exact **per-caret** reveal — where only the markers immediately around the caret (`**`, `` ` ``, `#`) surface while the rest of the line stays rendered — is *partial*: the marker-range algorithm (`hiddenMarkers`) exists and is tested, but wiring it to a live custom caret depends on the custom input substrate below (§5) and is roadmap work. Preview mode stays block-edit **by design**.
+
 ## 2. Markdown — CommonMark + GFM ✅
 
 A hand-written, offset-exact parser (zero dependencies) covering:
@@ -56,11 +60,13 @@ A hand-written, offset-exact parser (zero dependencies) covering:
 
 **Inline:** `**strong**` / `*emphasis*` (and `_`), `~~strikethrough~~`, `` `inline code` ``, `[links](url "title")`, `![images](url)`, `<autolinks>`, and hard/soft line breaks.
 
-The parser never throws on malformed or incomplete input (degrades gracefully) and is bounded against pathological input (e.g. runs of unmatched brackets stay O(n)). 🔜 **Not yet:** footnotes, definition lists.
+The parser never throws on malformed or incomplete input (degrades gracefully) and is bounded against pathological input (e.g. runs of unmatched brackets stay O(n)). ✅ **Also shipped:** GFM **footnotes** (`[^id]` references + `[^id]:` definition blocks rendered as a GitHub-style ordered list with back-links) and **definition lists** (`term` / `: definition` → `<dl>/<dt>/<dd>`); both degrade to plain text when malformed.
 
-## 3. MDX 🟡
+## 3. MDX ✅
 
-MDX **markup** is recognized by the parser — JSX elements, ESM `import`/`export` lines, and `{expressions}` are captured as offset-exact nodes (so they highlight, fold, and select correctly). 🔜 **Component execution is deferred:** MDX/JSX currently renders as **escaped source** (the safety boundary), not as live React components. The execution path (compile via wasm transform → run in an opaque-origin sandboxed `iframe`, Electron-safe) is designed in [SPEC.md §7](../SPEC.md#7-mdx-the-markupexecution-split) and represented in the [design prototype](../demo/design-prototype.html).
+MDX **markup** is recognized by the parser — JSX elements, ESM `import`/`export` lines, and `{expressions}` are captured as offset-exact nodes (so they highlight, fold, and select correctly).
+
+✅ **Component execution is shipped** via the `typewright/mdx` entry, opt-in behind `extensions.mdx` + a configured transform. The path is exactly the one designed in [SPEC.md §7](../SPEC.md#7-mdx-the-markupexecution-split): a transform adapter (`wasm-esbuild` / `wasm-swc` — host-installed optional peers — or the built-in zero-dep `constrained` subset, or a host function) runs **off-thread in a Blob worker**, and the result evaluates inside an **opaque-origin sandboxed `iframe`** (`allow-scripts`, never `allow-same-origin`; strict CSP). The compiled output stays *inside* the iframe (the iframe is the widget) — it is never `innerHTML`'d into the host tree, so the XSS→RCE path stays closed (Electron-safe). No transform configured → the block falls back to **escaped source** exactly as before; malformed JSX shows an inline error card and never blocks editing. Bundles nothing: esbuild-wasm / swc are host-supplied.
 
 ## 4. Formatting toolbar & command engine ✅
 
@@ -76,17 +82,21 @@ Each command (`core/commands.ts` → `applyCommand(text, selection, command)`) i
 
 ## 5. Keyboard shortcuts ✅
 
-Standard text-editing shortcuts in any editing surface: `⌘/Ctrl+B` bold, `⌘/Ctrl+I` italic, `⌘/Ctrl+K` link, `⌘/Ctrl+E` inline code — plus native selection, undo/redo, and caret motion. Rebindable keymap is designed ([`KeymapOptions`](../src/types.ts)); the default preset ships. IME/composition is handled by the platform text-input layer (deep IME/bidi hardening is on the roadmap).
+Standard text-editing shortcuts in any editing surface: `⌘/Ctrl+B` bold, `⌘/Ctrl+I` italic, `⌘/Ctrl+K` link, `⌘/Ctrl+E` inline code — plus native selection, undo/redo, and caret motion. ✅ The **rebindable keymap** ([`KeymapOptions`](../src/types.ts)) is live — `keymap.preset` (incl. `'none'` to disable) + per-command `bindings` overrides — and every shortcut now routes through the same tested command engine as the toolbar (no more double-wrap on repeat). A **⌘K command palette** enumerates and runs every command (§ Settings). 
+
+**IME / composition** is handled correctly today by the **native `<textarea>` editing surfaces** — composition, dead keys and CJK input all work through the platform text-input layer. 🟡 The SPEC §4.4 **custom hidden-sink input substrate** (a single positioned hidden sink driving a fully custom caret/selection view) is *not* the current mechanism — editing uses native textareas per block rather than the bespoke sink. This is a deliberate, correct-for-IME choice for v0.2; the custom substrate remains roadmap work (it is what unlocks per-caret reveal in §Live preview).
 
 ## 6. Section folding ✅
 
-**Semantic** heading folding: fold a heading and everything beneath it collapses to the next same-or-higher heading (never regex-based — it walks the parse tree). A per-heading chevron folds/unfolds; a folded section shows a summary chip (`N blocks · M subsections`). Fold ranges are also available headless (`headingFoldRanges`). 🔜 **Not yet:** the fold **menu** (set Heading 1–6, Fold-all / Unfold-all, copy-link) shown in the design prototype.
+**Semantic** heading folding: fold a heading and everything beneath it collapses to the next same-or-higher heading (never regex-based — it walks the parse tree). A per-heading chevron folds/unfolds; a folded section shows a summary chip (`N blocks · M subsections`). Fold ranges are also available headless (`headingFoldRanges`). ✅ **Shipped:** the fold **menu** — set Heading 1–6 (rewrites the `#` run), Toggle Folding, Fold-all / Unfold-all headers, and Copy Link (GitHub-style `#slug` to the clipboard), keyboard-accessible. `FoldingOptions` is honored: `persistKey` persists the folded set across reloads (re-anchored by heading text) and `showGutter:false` hides the chevrons.
 
 ## 7. Streaming preview + anticipation ✅
 
 `<StreamingPreview>` renders an AI/LLM token stream incrementally and **optimistically resolves incomplete formatting** so the preview reads as finished prose while it's still arriving:
 
-- `*bo` → in-progress **bold**; `` `co `` → inline code; an open ```` ``` ```` → a live code block; a forming `<Component` → a shimmer skeleton.
+- `*bo` / `_bo` → in-progress **bold**/italic; `` `co `` → inline code; an open ```` ``` ```` → a live code block; a forming `<Component` → a shimmer skeleton.
+- ✅ Now also anticipates **forming links** (`[text](…`), **list items**, and **table rows** (a partial `| a | b` renders an in-progress row), via the `AnticipationOptions.links` / `listItems` / `tables` flags.
+- ✅ **Smooth reveal** (`StreamOptions.smooth` / `<StreamingPreview smooth>`): a reveal cursor advances at `charsPerSecond` and flushes on `end()`, so bursty token arrival reads as steady typing. `componentFallback` is surfaced as a prop.
 - **Confirmed content never reflows** (parity-based open-delimiter detection).
 - Rendered **block-by-block with entrance animations** (stable committed blocks — no full-innerHTML flicker) and a live caret.
 
@@ -103,18 +113,26 @@ Drive it with an updating `text` prop, or hand it a `stream` (async iterable or 
 
 ## 10. Performance ✅
 
-- Incremental, block-structured parsing; parse cost tracks the edit, not the document.
+- ✅ **Incremental, block-structured reparse** (`parseIncremental`): reuses the block prefix before the edit and is proven deep-equal to a full parse by a one-way property test. Measured **~1.9× (mid-doc) to ~8× (append) faster** than a full reparse on a 50 KB doc (GC-free floor).
 - No React on the per-keystroke path in the block model.
+- ✅ **Threshold-gated virtualization** for very large documents (`overscan` honored) keeps the rendered DOM bounded so 1 MB docs stay editable.
 - Target metric is **keystroke-to-paint latency (INP)** on realistic documents, not batch throughput ([SPEC.md §10](../SPEC.md#10-performance-targets--benchmarking)).
-- 🔜 Custom viewport **virtualization** for very large documents is on the roadmap.
+- ✅ **Reproducible benchmark harness + published numbers** (`pnpm bench`) and a **gzip size budget** with a hard CI gate on the headless core (`pnpm size`, core ≈ 12.7 KB gzip). See **[docs/BENCHMARKS.md](./BENCHMARKS.md)** — including the honestly-reported miss: a *mid-document* keystroke on a 1 MB doc currently reparses to end-of-document (~34 ms floor, more under GC), because the reparse is correctness-first (reparse-span tightening is tracked roadmap work).
 
-## 11. Collaboration & comments 🔜
+## 11. Collaboration & comments ✅
 
-Anchored comment threads (offsets ride position-mapping), selection → comment, replies + reactions, resolve, plus presence avatars and live cursors. **Designed, not yet built** — fully represented in the [design prototype](../demo/design-prototype.html) and specified as C20–C23 / SPEC.md §14. Next roadmap feature.
+✅ **Shipped** (data-in / events-out — the library stores nothing; the host owns the transport, so CRDT/network stays possible per SPEC §14 without being imposed):
 
-## 12. Settings 🔜
+- **Anchored comment threads:** select text → floating Comment action → composer; the created thread highlights its exact range, and the **anchor survives edits** — insert a paragraph above it and the highlight stays on the same words (offsets ride the same `DocChange` position-mapping as everything else, via `mapAnchor`).
+- **Sidebar** with per-thread quote, threaded **replies**, emoji **reactions** (fixed set), and **resolve / reopen**; click a thread to scroll to and flash its highlight. Wired through `CommentsOptions` (`threads` + `onCreate`/`onReply`/`onReact`/`onResolve`/`onDelete`).
+- **Presence:** avatar row + live remote cursors/selections rendered as overlays at the correct text positions, from `presence` peers supplied as props.
 
-A built-in settings / command surface (config + command palette) over the editor. Designed; not yet built. (Configuration is available today via component props.)
+## 12. Settings ✅
+
+✅ **Shipped:** a built-in settings panel + **⌘K command palette**.
+
+- **Settings panel:** live toggles for mode (fires `onModeChange`), toolbar (docked/floating), folding, theme appearance, and each extension — session-state, host-overridable.
+- **Command palette (⌘K / Ctrl+K):** fuzzy-filter overlay listing every registered command (from the single-source `COMMANDS` registry) plus host-supplied entries; Enter runs it against the live selection through the same command engine as the toolbar and keymap.
 
 ---
 
@@ -138,8 +156,13 @@ import { TypewrightEditor } from 'typewright';
 | `theme` | `{ appearance?, tokens? }` | `'light' \| 'dark' \| 'auto'`. |
 | `readOnly` | `boolean` | |
 | `placeholder` | `string` | |
-| `extensions` | `{ gfm, mdx, mermaid, math, syntaxHighlight }` | Feature flags (GFM always on in v0.1). |
-| `keymap` | `KeymapOptions` | |
+| `extensions` | `{ gfm, mdx, mermaid, math, syntaxHighlight }` | Feature flags — all functional in v0.2 (GFM always on; `mdx`/`mermaid`/`math` also need a host-supplied transform/engine to execute, else they render as escaped/plain source). |
+| `keymap` | `KeymapOptions` | `preset` (incl. `'none'`) + per-command `bindings`. |
+| `comments` | `boolean \| CommentsOptions` | Anchored comment threads (data-in / events-out). |
+| `presence` | `PresencePeer[]` | Remote avatars + live cursors. |
+| `settings` | `boolean \| SettingsOptions` | Settings panel + ⌘K palette (host-extensible entries). |
+| `overscan` | `number` | Virtualization overscan (rows beyond the viewport). |
+| `onModeChange` | `(mode) => void` | Fires when the settings panel switches mode. |
 | `className` / `style` | | |
 
 **Imperative handle** (via `ref`):
@@ -162,7 +185,9 @@ import { StreamingPreview } from 'typewright';
 |---|---|
 | `text` | `string` (controlled) |
 | `stream` | `AsyncIterable<string> \| ReadableStream<string>` |
-| `anticipate` | `boolean \| AnticipationOptions` |
+| `anticipate` | `boolean \| AnticipationOptions` (`links` · `listItems` · `tables` · `emphasis`) |
+| `smooth` | `boolean \| { charsPerSecond }` (steady reveal) |
+| `componentFallback` | render for a forming/unknown component |
 | `className` / `style` | |
 
 ### Headless core — `typewright/core`
@@ -170,10 +195,14 @@ import { StreamingPreview } from 'typewright';
 Framework-agnostic, zero-dependency:
 
 - `parse(src): Document` — offset-exact GFM/MDX-markup AST.
-- `renderToHtml(doc)` / `renderInline(nodes)` / `renderNode(node)` — sanitized HTML. `safeUrl(url)`.
+- `parseIncremental(prev, prevSrc, change, nextSrc): Document` — reuse-the-prefix reparse, deep-equal to a full `parse` (property-tested).
+- `renderToHtml(doc, opts?)` / `renderInline(nodes)` / `renderNode(node)` — sanitized HTML. `safeUrl(url)`. `RenderOptions.highlight` threads the tokenizer in.
+- `highlightToHtml(lang, code)` — native, zero-dep syntax colouring (escaped `tw-tok-*` spans) for js/ts/jsx/tsx, json, css, html, md, python, bash, sql.
 - `collectMarkers(doc)` / `hiddenMarkers(doc, sel)` / `activeBlockIndex(doc, offset)` — unified-mode logic.
 - `headingFoldRanges(doc)` — fold ranges.
-- `applyCommand(text, sel, command)` — the command engine.
+- `applyCommand(text, sel, command)` + `COMMANDS` — the command engine + its enumerable registry (labels/kbd/group).
+- `mapAnchor(anchor, change)` — comment-anchor position mapping.
+- `cellSourceRange` / `addRow` / `addColumn` / `removeRow` / `removeColumn` / `setAlignment` — pure GFM table-grid helpers.
 - `TextDoc` — immutable document model with transaction edits + position mapping.
 - The AST node types (`Document`, `Block`, `Inline`, …).
 
@@ -190,10 +219,11 @@ Framework-agnostic, zero-dependency:
 | Import | Contents | React? |
 |---|---|---|
 | `typewright` | `<TypewrightEditor>`, `<StreamingPreview>`, types | yes (peer) |
-| `typewright/core` | parser, renderer, unified/fold logic, commands, model, AST | no |
+| `typewright/core` | parser (+ incremental), renderer, highlight, unified/fold logic, commands, table + comment helpers, model, AST | no |
 | `typewright/streaming` | stream controller + anticipation renderer | no |
+| `typewright/mdx` | sandboxed MDX execution (transform adapters + opaque-origin iframe host) | no |
 
-**Zero runtime dependencies.** `react` / `react-dom` (≥18) are optional peers (only for the React entry). Ships ESM + CJS + `.d.ts`.
+**Zero runtime dependencies.** `react` / `react-dom` (≥18) are optional peers (only for the React entry and MDX widget islands). The MDX transform (`esbuild-wasm` / `@swc/wasm-web`) and any Mermaid/KaTeX engine are **host-supplied optional peers — never bundled**. Ships ESM + CJS + `.d.ts`.
 
 ## Runtime support
 
@@ -201,7 +231,16 @@ Modern browsers and Electron (web + desktop). The headless core runs anywhere (i
 
 ## Roadmap
 
-Next features, each shipped as its own pass (see [plan-TW-0001.md](./plans/plan-TW-0001.md) §15): **comments & collaboration** → **settings surface** → syntax **colouring** of code → **MDX execution** (sandboxed) → **Mermaid/math** → in-place **table grid** → character-level inline reveal → custom virtualization + deep IME. The [design prototype](../demo/design-prototype.html) shows the full intended experience.
+v0.2 (this release) shipped the previously-deferred surfaces: comments & presence, settings + ⌘K palette, native syntax colouring, sandboxed MDX execution, Mermaid + math engine hooks, the in-place table grid, the fold menu, footnotes + definition lists, streaming link/list/table anticipation + smoothing, the incremental parser, and threshold-gated virtualization — plus the benchmark harness and gzip size budget.
+
+**What genuinely remains** (the two honest 🟡 rows above, and the follow-through):
+
+1. **Custom input substrate (SPEC §4.4).** Replace the per-block native `<textarea>` surfaces with a single hidden input sink driving a fully custom caret/selection view. Native textareas already handle IME/composition correctly, so this is not an IME fix — it is the substrate the next item needs.
+2. **Character-level (per-caret) marker reveal.** With the custom sink in place, reveal only the markers around the caret rather than exposing a whole block's source on click. The marker-range algorithm (`hiddenMarkers`) is already built and tested; this is the view work to render it live.
+3. **Reparse-span tightening** — stop the incremental reparse at the next safe block boundary after the edit instead of running to end-of-document, to pull the mid-document 1 MB keystroke under the SPEC §10 budget (see [BENCHMARKS.md](./BENCHMARKS.md)).
+4. **Published competitor baseline + full a11y sweep** — run the CodeMirror-6 / Lezer bench baseline and the automated axe-core pass over every surface in the e2e phase (harnesses exist; see BENCHMARKS.md).
+
+The [design prototype](../demo/design-prototype.html) shows the full intended experience.
 
 ---
 
