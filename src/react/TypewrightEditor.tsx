@@ -1,7 +1,9 @@
 import * as React from 'react';
 import { applyCommand, COMMANDS, highlightToHtml, parse, renderNode, renderToHtml } from '../core';
-import type { Command, ParseOptions, RenderOptions } from '../core';
-import type { DocChange, EditorConfig, EditorEvents, EditorMode, KeymapOptions } from '../types';
+import type { Block, Command, ParseOptions, RenderOptions } from '../core';
+import type { DocChange, EditorConfig, EditorEvents, EditorMode, FoldingOptions, KeymapOptions } from '../types';
+import { FoldMenu, FOLDMENU_CSS } from './FoldMenu';
+import { TableGrid, TABLEGRID_CSS } from './TableGrid';
 
 /** Imperative handle exposed via a ref on `<TypewrightEditor>`. */
 export interface TypewrightEditorHandle {
@@ -50,7 +52,9 @@ export function useInjectStyles(): void {
     if (document.getElementById(STYLE_ID)) return;
     const el = document.createElement('style');
     el.id = STYLE_ID;
-    el.textContent = TYPEWRIGHT_CSS;
+    // One injected sheet keyed by STYLE_ID carries the editor chrome plus the
+    // widget-island styles (table grid + fold menu), so consumers need no extra CSS.
+    el.textContent = TYPEWRIGHT_CSS + TABLEGRID_CSS + FOLDMENU_CSS;
     document.head.appendChild(el);
   }, []);
 }
@@ -225,7 +229,12 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
     }, []);
     React.useImperativeHandle(forwardedRef, () => ({ applyCommand: applyCmd, setMode }), [applyCmd, setMode]);
 
-    const foldable = folding === undefined ? true : folding !== false;
+    // `folding` is `boolean | FoldingOptions`: a bare boolean toggles the whole
+    // feature; the options object splits enabled / gutter visibility / persistence.
+    const foldOpts: FoldingOptions | null = folding && typeof folding === 'object' ? folding : null;
+    const foldingEnabled = folding === undefined ? true : foldOpts ? foldOpts.enabled !== false : folding !== false;
+    const showGutter = foldOpts ? foldOpts.showGutter !== false : true;
+    const persistKey = foldOpts ? foldOpts.persistKey : undefined;
     const appearance = theme?.appearance ?? 'auto';
     const rootClass = ['tw-editor', `tw-mode-${mode}`, appearance !== 'auto' ? `tw-theme-${appearance}` : '', className]
       .filter(Boolean)
@@ -275,7 +284,9 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
         style={style}
         readOnly={readOnly}
         placeholder={placeholder}
-        foldable={foldable}
+        foldingEnabled={foldingEnabled}
+        showGutter={showGutter}
+        persistKey={persistKey}
         commitValue={commitValue}
         register={register}
         toolbar={toolbarEl}
@@ -352,7 +363,12 @@ interface UnifiedProps {
   style?: React.CSSProperties;
   readOnly: boolean;
   placeholder: string;
-  foldable: boolean;
+  /** Whether headings fold their sections at all. */
+  foldingEnabled: boolean;
+  /** Whether the per-heading fold gutter (chevron + options affordance) renders. */
+  showGutter: boolean;
+  /** localStorage namespace for persisting the folded set across reloads. */
+  persistKey?: string;
   commitValue: (next: string, change: DocChange) => void;
   register?: (api: ActiveSource | null) => void;
   toolbar?: React.ReactNode;
@@ -362,11 +378,19 @@ interface UnifiedProps {
 }
 
 function UnifiedEditor(props: UnifiedProps): React.ReactElement {
-  const { md, mdRef, rootClass, style, readOnly, placeholder, foldable, commitValue, register, toolbar, parseOpts, renderOpts, bindings } = props;
+  const { md, mdRef, rootClass, style, readOnly, placeholder, foldingEnabled, showGutter, persistKey, commitValue, register, toolbar, parseOpts, renderOpts, bindings } = props;
   const [active, setActive] = React.useState<number | null>(null);
   const [draft, setDraft] = React.useState('');
-  const [folds, setFolds] = React.useState<Set<number>>(() => new Set());
+  // Seed the folded set from persisted heading keys (re-anchored to the current
+  // blocks) when a persistKey is configured; otherwise start empty.
+  const [folds, setFolds] = React.useState<Set<number>>(() =>
+    persistKey ? loadFoldSet(persistKey, parse(mdRef.current, parseOpts).children, mdRef.current) : new Set(),
+  );
   const [typing, setTyping] = React.useState(false);
+  // Which heading index (if any) has its FoldMenu open, and the affordance rect
+  // the fixed-position menu anchors to.
+  const [foldMenuFor, setFoldMenuFor] = React.useState<number | null>(null);
+  const [foldMenuRect, setFoldMenuRect] = React.useState<DOMRect | null>(null);
 
   const activeRef = React.useRef<number | null>(null);
   const draftRef = React.useRef('');
@@ -403,6 +427,89 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
 
   const doc = React.useMemo(() => parse(md, parseOpts), [md, parseOpts]);
   const blocks = doc.children;
+
+  // Refs let the fold/menu callbacks read the freshest blocks/source without
+  // being torn down and rebuilt on every parse.
+  const blocksRef = React.useRef(blocks);
+  blocksRef.current = blocks;
+  const foldsRef = React.useRef(folds);
+  foldsRef.current = folds;
+
+  // Single fold-set writer: updates state and (when configured) persists the
+  // folded headings by their stable key so the collapse survives a reload.
+  const commitFolds = React.useCallback(
+    (next: Set<number>) => {
+      setFolds(next);
+      if (persistKey) saveFoldSet(persistKey, next, blocksRef.current, mdRef.current);
+    },
+    [persistKey, mdRef],
+  );
+
+  const toggleFold = React.useCallback(
+    (i: number) => {
+      const next = new Set(foldsRef.current);
+      if (next.has(i)) next.delete(i);
+      else next.add(i);
+      commitFolds(next);
+    },
+    [commitFolds],
+  );
+
+  const foldAll = React.useCallback(() => {
+    const next = new Set<number>();
+    blocksRef.current.forEach((b, i) => {
+      if (b.type === 'heading') next.add(i);
+    });
+    commitFolds(next);
+  }, [commitFolds]);
+
+  const unfoldAll = React.useCallback(() => commitFolds(new Set()), [commitFolds]);
+
+  // Rewrite a heading's `#`-run to `level` hashes via a splice over its marker
+  // range `[from, contentFrom)` (contentFrom is exposed on the heading node).
+  const setHeadingLevel = React.useCallback(
+    (i: number, level: number) => {
+      const b = blocksRef.current[i];
+      if (!b || b.type !== 'heading') return;
+      const src = mdRef.current;
+      const marker = '#'.repeat(level) + ' ';
+      const change: DocChange = { from: b.from, to: b.contentFrom, insert: marker };
+      const next = src.slice(0, change.from) + marker + src.slice(change.to);
+      if (next !== src) {
+        commitValue(next, change);
+        mdRef.current = next;
+      }
+    },
+    [mdRef, commitValue],
+  );
+
+  const copyHeadingLink = React.useCallback(
+    (i: number) => {
+      const b = blocksRef.current[i];
+      if (!b || b.type !== 'heading') return;
+      const slug = slugify(mdRef.current.slice(b.contentFrom, b.to));
+      try {
+        void navigator.clipboard?.writeText('#' + slug);
+      } catch {
+        /* clipboard unavailable (permissions / insecure context) */
+      }
+    },
+    [mdRef],
+  );
+
+  // A table cell / structural edit arrives as an already-scoped splice; apply it
+  // to the current source and commit verbatim (TableGrid owns the range math).
+  const handleTableChange = React.useCallback(
+    (change: DocChange) => {
+      const src = mdRef.current;
+      const next = src.slice(0, change.from) + change.insert + src.slice(change.to);
+      if (next !== src) {
+        commitValue(next, { from: change.from, to: change.to, insert: change.insert });
+        mdRef.current = next;
+      }
+    },
+    [mdRef, commitValue],
+  );
 
   const commit = React.useCallback((): { next: string; change: DocChange | null } => {
     const a = activeRef.current;
@@ -449,7 +556,7 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
   // which block indices are hidden by a folded ancestor heading
   const hidden = React.useMemo(() => {
     const set = new Set<number>();
-    if (!foldable) return set;
+    if (!foldingEnabled) return set;
     for (let i = 0; i < blocks.length; i++) {
       const b = blocks[i]!;
       if (b.type === 'heading' && folds.has(i)) {
@@ -461,7 +568,7 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
       }
     }
     return set;
-  }, [blocks, folds, foldable]);
+  }, [blocks, folds, foldingEnabled]);
 
   if (readOnly && !md.trim()) {
     return (
@@ -507,23 +614,53 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
               else rowEls.current.delete(i);
             }}
           >
-            {foldable && isHeading && !readOnly && (
-              <button
-                type="button"
-                className={`tw-fold${folded ? ' tw-folded' : ''}`}
-                aria-label={folded ? 'Unfold section' : 'Fold section'}
-                aria-expanded={!folded}
-                onClick={() => {
-                  const nextFolds = new Set(folds);
-                  if (folded) nextFolds.delete(i);
-                  else nextFolds.add(i);
-                  setFolds(nextFolds);
-                }}
-              >
-                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="m6 9 6 6 6-6" />
-                </svg>
-              </button>
+            {foldingEnabled && b.type === 'heading' && !readOnly && showGutter && (
+              <>
+                {/* Chevron: the fast path — a plain click toggles this section's fold. */}
+                <button
+                  type="button"
+                  className={`tw-fold${folded ? ' tw-folded' : ''}`}
+                  aria-label={folded ? 'Unfold section' : 'Fold section'}
+                  aria-expanded={!folded}
+                  onClick={() => toggleFold(i)}
+                >
+                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="m6 9 6 6 6-6" />
+                  </svg>
+                </button>
+                {/* Options affordance: opens the heading FoldMenu (level, fold-all, copy link). */}
+                <button
+                  type="button"
+                  className="tw-fold-more"
+                  aria-label="Heading options"
+                  aria-haspopup="menu"
+                  aria-expanded={foldMenuFor === i}
+                  onClick={(e) => {
+                    setFoldMenuRect(e.currentTarget.getBoundingClientRect());
+                    setFoldMenuFor(i);
+                  }}
+                >
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" stroke="none" aria-hidden="true">
+                    <circle cx="5" cy="12" r="1.7" />
+                    <circle cx="12" cy="12" r="1.7" />
+                    <circle cx="19" cy="12" r="1.7" />
+                  </svg>
+                </button>
+                {foldMenuFor === i && (
+                  <FoldMenu
+                    open
+                    level={b.level}
+                    folded={folded}
+                    anchorRect={foldMenuRect}
+                    onSetLevel={(n) => setHeadingLevel(i, n)}
+                    onToggleFold={() => toggleFold(i)}
+                    onFoldAll={foldAll}
+                    onUnfoldAll={unfoldAll}
+                    onCopyLink={() => copyHeadingLink(i)}
+                    onClose={() => setFoldMenuFor(null)}
+                  />
+                )}
+              </>
             )}
             {active === i && !readOnly ? (
               <SourceArea
@@ -535,6 +672,10 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
                 onBlur={() => { captureFlip(); commit(); }}
                 onEscape={() => { captureFlip(); commit(); }}
               />
+            ) : b.type === 'table' && !readOnly ? (
+              // A table is edited in its grid, not via a click-to-reveal source
+              // textarea; the grid emits already-scoped splices we apply verbatim.
+              <TableGrid table={b} source={mdRef.current} onChange={handleTableChange} readOnly={readOnly} />
             ) : (
               <div
                 className="tw-block"
@@ -556,7 +697,7 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
               />
             )}
             {folded && (
-              <button type="button" className="tw-foldchip" onClick={() => { const n = new Set(folds); n.delete(i); setFolds(n); }}>
+              <button type="button" className="tw-foldchip" onClick={() => toggleFold(i)}>
                 … {foldedSummary(blocks, i)}
               </button>
             )}
@@ -565,6 +706,77 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
       })}
     </div>
   );
+}
+
+/* ------------------------------------------------------------------ *
+ * Fold persistence — keyed by heading (stable across edits), not index
+ * ------------------------------------------------------------------ */
+
+const FOLD_STORE_PREFIX = 'typewright-folds:';
+
+/** GitHub-style heading slug: lowercase, spaces→`-`, drop non-alphanumeric-except-hyphen. */
+function slugify(text: string): string {
+  return text.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+}
+
+/**
+ * Block index → a stable persistence key for every heading. The key is the
+ * heading's slug, disambiguated GitHub-style (`slug`, `slug-1`, …) when two
+ * headings share a slug, so a folded set re-anchors to the right rows on reload
+ * even though raw offsets/indices drift across edits.
+ */
+function headingKeyMap(blocks: readonly Block[], src: string): Map<number, string> {
+  const seen = new Map<string, number>();
+  const out = new Map<number, string>();
+  blocks.forEach((b, i) => {
+    if (b.type !== 'heading') return;
+    const base = slugify(src.slice(b.contentFrom, b.to)) || 'section';
+    const n = seen.get(base) ?? 0;
+    seen.set(base, n + 1);
+    out.set(i, n === 0 ? base : `${base}-${n}`);
+  });
+  return out;
+}
+
+/** Resolve the persisted heading keys for `persistKey` to current block indices. */
+function loadFoldSet(persistKey: string, blocks: readonly Block[], src: string): Set<number> {
+  const set = new Set<number>();
+  if (typeof window === 'undefined') return set;
+  let raw: string | null = null;
+  try {
+    raw = window.localStorage.getItem(FOLD_STORE_PREFIX + persistKey);
+  } catch {
+    return set;
+  }
+  if (!raw) return set;
+  let keys: unknown;
+  try {
+    keys = JSON.parse(raw);
+  } catch {
+    return set;
+  }
+  if (!Array.isArray(keys)) return set;
+  const wanted = new Set(keys as string[]);
+  headingKeyMap(blocks, src).forEach((key, idx) => {
+    if (wanted.has(key)) set.add(idx);
+  });
+  return set;
+}
+
+/** Persist the folded set as heading keys under `persistKey`. */
+function saveFoldSet(persistKey: string, folds: Set<number>, blocks: readonly Block[], src: string): void {
+  if (typeof window === 'undefined') return;
+  const keyMap = headingKeyMap(blocks, src);
+  const keys: string[] = [];
+  folds.forEach((idx) => {
+    const key = keyMap.get(idx);
+    if (key) keys.push(key);
+  });
+  try {
+    window.localStorage.setItem(FOLD_STORE_PREFIX + persistKey, JSON.stringify(keys));
+  } catch {
+    /* storage unavailable (private mode / quota) — folding still works in-session */
+  }
 }
 
 function foldedSummary(blocks: readonly { type: string; level?: number }[], idx: number): string {
@@ -721,6 +933,9 @@ const TYPEWRIGHT_CSS = `
 .tw-block>:first-child{margin-top:.15em} .tw-block>:last-child{margin-bottom:.15em}
 .tw-fold{flex:none; width:20px; height:24px; margin-top:.35em; border:0; background:none; color:var(--tw-faint); border-radius:5px; display:grid; place-items:center; cursor:pointer; opacity:.55; transition:opacity .15s,color .15s,transform .15s}
 .tw-fold:hover{opacity:1; color:var(--tw-accent)} .tw-fold.tw-folded svg{transform:rotate(-90deg)}
+.tw-fold-more{flex:none; width:18px; height:24px; margin-top:.35em; border:0; background:none; color:var(--tw-faint); border-radius:5px; display:grid; place-items:center; cursor:pointer; opacity:0; transition:opacity .15s,color .15s}
+.tw-row:hover .tw-fold-more,.tw-fold-more:focus-visible,.tw-fold-more[aria-expanded="true"]{opacity:.6}
+.tw-fold-more:hover,.tw-fold-more[aria-expanded="true"]{opacity:1; color:var(--tw-accent)}
 .tw-foldchip{margin-left:6px; font-size:12.5px; color:var(--tw-faint); background:none; border:1px dashed var(--tw-line); border-radius:7px; padding:2px 9px; cursor:pointer}
 .tw-foldchip:hover{color:var(--tw-muted); border-color:var(--tw-accent)}
 .tw-source{width:100%; box-sizing:border-box; font-family:"SF Mono",ui-monospace,Menlo,monospace; font-size:13.5px; line-height:1.6; color:var(--tw-fg); background:var(--tw-accent-soft); border:1px solid var(--tw-accent); border-radius:7px; padding:6px 9px; resize:none; outline:none}
