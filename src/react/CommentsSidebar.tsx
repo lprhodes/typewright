@@ -16,8 +16,6 @@ import type { CommentThread } from '../types';
 /** The fixed reaction set (K-7; mirrors the design demo). */
 export const REACT_EMOJI = ['👍', '🎯', '👀', '🎉'] as const;
 
-type ReactEmoji = (typeof REACT_EMOJI)[number];
-
 export interface CommentsSidebarProps {
   /** All threads to render; the host is the source of truth. */
   threads: CommentThread[];

@@ -300,6 +300,23 @@ function plainify(src: string): string {
   return s.replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * Rendered-text caret index for a raw source cursor offset within a block scope.
+ * `scopeFrom`/`cursorFrom` are DOCUMENT/source offsets, but the block's rendered
+ * text has had its Markdown markers stripped — so we map through {@link plainify}
+ * (the SAME reduction the comment-highlight path uses) instead of subtracting raw
+ * offsets, which would otherwise push the caret past its glyph on any block that
+ * carries markers (headings, lists, `**`/`` ` ``/`[]()`). Clamped to `renderedLen`.
+ */
+export function renderedCaretIndex(
+  source: string,
+  scopeFrom: number,
+  cursorFrom: number,
+  renderedLen: number,
+): number {
+  return Math.min(plainify(source.slice(scopeFrom, cursorFrom)).length, renderedLen);
+}
+
 /** Initials for a presence chip (up to two letters). */
 function peerInitials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -487,7 +504,10 @@ function applyDecorations(
       if (!cur) continue;
       if (cur.from < scope.from || cur.from > scope.to) continue;
       const rendered = scope.el.textContent?.length ?? 0;
-      const idx = Math.min(Math.max(0, cur.from - scope.from), rendered);
+      // `cur.from` is a raw source offset; map it to a rendered-text index the
+      // same way the comment path does, so the caret lands on the right glyph on
+      // blocks that carry Markdown markers (headings, lists, `**`/`` ` ``/`[]()`).
+      const idx = renderedCaretIndex(source, scope.from, cur.from, rendered);
       insertRemoteCursor(scope.el, idx, peer);
     }
   }
@@ -1394,10 +1414,12 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
   const { md, mdRef, rootClass, style, readOnly, placeholder, foldingEnabled, showGutter, persistKey, commitValue, register, toolbar, parseOpts, renderOpts, bindings, islands, contentRef, commentsActive, onCommentSelect, overscan, lastCommitRef, onVisibleChange } = props;
   const [active, setActive] = React.useState<number | null>(null);
   const [draft, setDraft] = React.useState('');
-  // Seed the folded set from persisted heading keys (re-anchored to the current
-  // blocks) when a persistKey is configured; otherwise start empty.
-  const [folds, setFolds] = React.useState<Set<number>>(() =>
-    persistKey ? loadFoldSet(persistKey, parse(mdRef.current, parseOpts).children, mdRef.current) : new Set(),
+  // Folds are stored by heading KEY (a stable slug), NOT block index, so a
+  // collapse tracks its heading across edits that insert/delete other blocks;
+  // the keys resolve to current block indices each render (see `foldedHeadings`).
+  // Seed from the persisted keys when a persistKey is configured, else empty.
+  const [folds, setFolds] = React.useState<Set<string>>(() =>
+    persistKey ? loadFoldSet(persistKey) : new Set(),
   );
   const [typing, setTyping] = React.useState(false);
   // Which heading index (if any) has its FoldMenu open, and the affordance rect
@@ -1473,34 +1495,36 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
   foldsRef.current = folds;
 
   // Single fold-set writer: updates state and (when configured) persists the
-  // folded headings by their stable key so the collapse survives a reload.
+  // folded heading keys so the collapse survives a reload. `folds` already holds
+  // stable keys, so persistence is a direct write.
   const commitFolds = React.useCallback(
-    (next: Set<number>) => {
+    (next: Set<string>) => {
       setFolds(next);
-      if (persistKey) saveFoldSet(persistKey, next, blocksRef.current, mdRef.current);
+      if (persistKey) saveFoldSet(persistKey, next);
     },
-    [persistKey, mdRef],
+    [persistKey],
   );
 
   const toggleFold = React.useCallback(
     (i: number) => {
+      // Toggle by the clicked heading's stable key (indices drift across edits).
+      const key = headingKeyMap(blocksRef.current, mdRef.current).get(i);
+      if (!key) return;
       const next = new Set(foldsRef.current);
-      if (next.has(i)) next.delete(i);
-      else next.add(i);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       commitFolds(next);
     },
-    [commitFolds],
+    [commitFolds, mdRef],
   );
 
   const foldAll = React.useCallback(() => {
-    const next = new Set<number>();
-    blocksRef.current.forEach((b, i) => {
-      if (b.type === 'heading') next.add(i);
-    });
+    const next = new Set<string>();
+    headingKeyMap(blocksRef.current, mdRef.current).forEach((key) => next.add(key));
     commitFolds(next);
-  }, [commitFolds]);
+  }, [commitFolds, mdRef]);
 
-  const unfoldAll = React.useCallback(() => commitFolds(new Set()), [commitFolds]);
+  const unfoldAll = React.useCallback(() => commitFolds(new Set<string>()), [commitFolds]);
 
   // Rewrite a heading's `#`-run to `level` hashes via a splice over its marker
   // range `[from, contentFrom)` (contentFrom is exposed on the heading node).
@@ -1590,13 +1614,28 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
     [commit, readOnly, captureFlip, parseOpts],
   );
 
+  // Resolve the folded heading KEYS to the CURRENT block indices each render.
+  // This is what makes a fold survive edits: after blocks shift, each stored key
+  // re-anchors to its heading's new index (and a key whose heading was deleted
+  // simply resolves to nothing), so the same section stays folded — never a
+  // sibling. A pure memo (no effect/setState), so it can't loop or clobber an
+  // active edit.
+  const foldedHeadings = React.useMemo(() => {
+    const set = new Set<number>();
+    if (!foldingEnabled) return set;
+    headingKeyMap(blocks, md).forEach((key, idx) => {
+      if (folds.has(key)) set.add(idx);
+    });
+    return set;
+  }, [blocks, md, folds, foldingEnabled]);
+
   // which block indices are hidden by a folded ancestor heading
   const hidden = React.useMemo(() => {
     const set = new Set<number>();
     if (!foldingEnabled) return set;
     for (let i = 0; i < blocks.length; i++) {
       const b = blocks[i]!;
-      if (b.type === 'heading' && folds.has(i)) {
+      if (b.type === 'heading' && foldedHeadings.has(i)) {
         for (let j = i + 1; j < blocks.length; j++) {
           const n = blocks[j]!;
           if (n.type === 'heading' && n.level <= b.level) break;
@@ -1605,7 +1644,7 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
       }
     }
     return set;
-  }, [blocks, folds, foldingEnabled]);
+  }, [blocks, foldedHeadings, foldingEnabled]);
 
   /* --- Block-level viewport virtualization (large docs only, IJ3) ------ */
   // The list of rows actually rendered (folded blocks excluded, as before).
@@ -1760,7 +1799,7 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
 
   const renderRow = (i: number, b: Block): React.ReactElement => {
     const isHeading = b.type === 'heading';
-    const folded = isHeading && folds.has(i);
+    const folded = isHeading && foldedHeadings.has(i);
     // Executable islands (MDX / Mermaid) render read-only in unified/preview —
     // like tables, they are NOT click-to-edit source; the raw source is
     // reached in `edit` mode. Null unless the host wired the extension up.
@@ -1935,7 +1974,7 @@ function slugify(text: string): string {
  * headings share a slug, so a folded set re-anchors to the right rows on reload
  * even though raw offsets/indices drift across edits.
  */
-function headingKeyMap(blocks: readonly Block[], src: string): Map<number, string> {
+export function headingKeyMap(blocks: readonly Block[], src: string): Map<number, string> {
   const seen = new Map<string, number>();
   const out = new Map<number, string>();
   blocks.forEach((b, i) => {
@@ -1948,9 +1987,9 @@ function headingKeyMap(blocks: readonly Block[], src: string): Map<number, strin
   return out;
 }
 
-/** Resolve the persisted heading keys for `persistKey` to current block indices. */
-function loadFoldSet(persistKey: string, blocks: readonly Block[], src: string): Set<number> {
-  const set = new Set<number>();
+/** Load the persisted folded heading keys for `persistKey` (stable across edits). */
+function loadFoldSet(persistKey: string): Set<string> {
+  const set = new Set<string>();
   if (typeof window === 'undefined') return set;
   let raw: string | null = null;
   try {
@@ -1966,24 +2005,15 @@ function loadFoldSet(persistKey: string, blocks: readonly Block[], src: string):
     return set;
   }
   if (!Array.isArray(keys)) return set;
-  const wanted = new Set(keys as string[]);
-  headingKeyMap(blocks, src).forEach((key, idx) => {
-    if (wanted.has(key)) set.add(idx);
-  });
+  for (const k of keys) if (typeof k === 'string') set.add(k);
   return set;
 }
 
-/** Persist the folded set as heading keys under `persistKey`. */
-function saveFoldSet(persistKey: string, folds: Set<number>, blocks: readonly Block[], src: string): void {
+/** Persist the folded heading keys under `persistKey`. */
+function saveFoldSet(persistKey: string, folds: Set<string>): void {
   if (typeof window === 'undefined') return;
-  const keyMap = headingKeyMap(blocks, src);
-  const keys: string[] = [];
-  folds.forEach((idx) => {
-    const key = keyMap.get(idx);
-    if (key) keys.push(key);
-  });
   try {
-    window.localStorage.setItem(FOLD_STORE_PREFIX + persistKey, JSON.stringify(keys));
+    window.localStorage.setItem(FOLD_STORE_PREFIX + persistKey, JSON.stringify([...folds]));
   } catch {
     /* storage unavailable (private mode / quota) — folding still works in-session */
   }

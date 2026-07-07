@@ -1,11 +1,14 @@
 /**
  * `typewright/streaming` — feed an AI/LLM token stream into a preview.
  *
- * Status: PRE-ALPHA SCAFFOLD. Text accumulation and stream piping below are
- * real and usable. The anticipatory formatting renderer — turning an incomplete
- * `*bo` into in-progress bold, an unterminated fence into an open code block,
- * and partial JSX into a component skeleton (SPEC.md §8) — is not yet wired to
- * a view; `createStreamController` accumulates and emits raw text for now.
+ * Text accumulation, stream piping, and smoothing are implemented:
+ * `createStreamController` buffers the incoming stream and, when `smooth` is
+ * set, drives a timer that reveals a steadily-growing prefix so bursty chunk
+ * arrivals read as smooth typing. The anticipatory formatting renderer —
+ * turning an incomplete `*bo` into in-progress bold, an unterminated fence into
+ * an open code block, and partial JSX into a component skeleton (SPEC.md §8) —
+ * lives in {@link anticipate} and is wired into the React `StreamingPreview`
+ * component in `typewright`.
  */
 
 import type { StreamController, StreamOptions } from '../types';

@@ -49,9 +49,14 @@ export interface EditorViewOptions extends EditorConfig, EditorEvents {
 }
 
 /**
- * The mounted editor. Owns the document string, the incremental parse tree,
- * the decoration set, and the virtualized viewport. React is not required to
- * use this class — the React component in `typewright` is a thin wrapper over it.
+ * PRE-ALPHA SCAFFOLD — not yet implemented. Constructing an `EditorView`
+ * throws: the stateful mounted engine (document string, incremental parse tree,
+ * decoration set, virtualized viewport) described in SPEC.md is still to come.
+ * This class only reserves the eventual public surface.
+ *
+ * To edit or render Markdown today, use the functional headless API exported
+ * from this module — {@link parse}, {@link parseIncremental}, {@link renderToHtml} —
+ * or the React `TypewrightEditor` component in `typewright`.
  */
 export class EditorView {
   readonly dom: HTMLElement;

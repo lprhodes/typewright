@@ -39,7 +39,11 @@ export interface GfmFeatures {
 
 export interface MermaidOptions {
   enabled: boolean;
-  /** Mermaid theme name; diagrams render inside the isolated sandbox. */
+  /**
+   * Mermaid theme name (e.g. `'default'`, `'forest'`). Reserved: the value is
+   * not yet applied to the sandboxed diagram — the sandbox currently follows the
+   * editor's light/dark appearance only. Kept as forward-compatible API surface.
+   */
   theme?: string;
   /**
    * Supplies the Mermaid engine to run **inside** the opaque-origin sandbox.
@@ -58,19 +62,29 @@ export interface MermaidOptions {
 
 export interface MathOptions {
   enabled: boolean;
+  /**
+   * Advisory hint only, reserved: the renderer does not read `engine` — math is
+   * rendered solely via the host-supplied {@link MathOptions.render} function
+   * (regardless of this value). Kept as forward-compatible API surface.
+   */
   engine?: 'katex' | 'custom';
   /**
-   * Host-supplied math renderer: given the raw `$…$` / `$$…$$` source and
-   * whether it is display (block) math, returns **already-sanitized** HTML that
-   * the renderer inserts verbatim. The host owns sanitization (e.g. KaTeX with
-   * `trust: false`). Without it, math renders as escaped source.
+   * Host-supplied math renderer — the actual path that renders math. Given the
+   * raw `$…$` / `$$…$$` source and whether it is display (block) math, returns
+   * **already-sanitized** HTML that the renderer inserts verbatim. The host owns
+   * sanitization (e.g. KaTeX with `trust: false`). Without a `render` fn, math
+   * renders as escaped source — enabling math without one has no visible effect.
    */
   render?: (src: string, display: boolean) => string;
 }
 
 export interface SyntaxHighlightOptions {
   enabled: boolean;
-  /** Highlight theme name. Editor highlighting is native; this is for previews. */
+  /**
+   * Highlight theme name. Reserved: not yet applied — token colours currently
+   * follow the editor's built-in native theme (light/dark) for both the editor
+   * and previews. Kept as forward-compatible API surface.
+   */
   theme?: string;
 }
 

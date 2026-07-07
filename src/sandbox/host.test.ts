@@ -6,6 +6,8 @@ import {
   dispatchInbound,
   buildSandboxCsp,
   buildSandboxSrcdoc,
+  buildEvaluateMessage,
+  MODULE_BINDINGS,
   createChannelToken,
   type InboundResult,
 } from './host';
@@ -132,6 +134,64 @@ describe('buildSandboxSrcdoc', () => {
     // the raw closing tag must not appear verbatim inside the engine <script>
     expect(doc).not.toContain('"</script>"');
     expect(doc).toContain('<\\/script>');
+  });
+});
+
+describe('component-map wiring (evaluate → frame → module)', () => {
+  // Regression: SandboxIsland calls evaluate(js, { components }), so the map
+  // must reach the compiled module. Previously the in-frame dispatch read a
+  // never-sent top-level `data.components`, leaving RT.components = {} and the
+  // transform's `const Callout = components["Callout"]` resolving to undefined
+  // (silently rendering an <undefined> element). These lock the wiring end-to-end.
+
+  it('buildEvaluateMessage carries the host component map under props.components', () => {
+    const Callout = () => null;
+    const msg = buildEvaluateMessage('return h("div")', { components: { Callout } });
+    expect(msg.code).toBe('return h("div")');
+    expect(msg.props.components).toEqual({ Callout });
+  });
+
+  it('buildEvaluateMessage defaults props to an empty object', () => {
+    expect(buildEvaluateMessage('return 1')).toEqual({ code: 'return 1', props: {} });
+  });
+
+  it('the in-frame dispatch forwards props.components into runModule → RT.components', () => {
+    const srcdoc = buildSandboxSrcdoc({ token: 't', csp: buildSandboxCsp() });
+    // The fix: read the standardized field the sender writes (props.components),
+    // not the never-sent `data.components`, and bind it as the module map.
+    expect(srcdoc).toContain(
+      'runModule(data.id, data.code, data.props, data.props && data.props.components)',
+    );
+    expect(srcdoc).toContain('RT.components = components || {}');
+    // …and the module wrapper the frame runs exposes it as `components`.
+    expect(srcdoc).toContain(MODULE_BINDINGS);
+  });
+
+  it('the module wrapper binds self.__tw.components → the module-scoped `components`', () => {
+    // Execute the EXACT bindings source the frame injects (MODULE_BINDINGS) and
+    // prove a compiled module referencing components["Callout"] resolves the host
+    // component — the end the bug silently rendered as <undefined>.
+    const Callout = (): string => 'CALLOUT';
+    document.body.innerHTML = '<div id="tw-root"></div>';
+    (globalThis as unknown as { __tw?: unknown }).__tw = {
+      h: () => null,
+      host: () => undefined,
+      components: { Callout },
+      props: {},
+    };
+    try {
+      const wrapper =
+        '"use strict";(function(){' + MODULE_BINDINGS + 'return components["Callout"];})();';
+      // eval is intentional and safe here: `wrapper` is a fixed, test-authored
+      // string (MODULE_BINDINGS is a module constant, no interpolation) — this
+      // reproduces exactly how the sandbox frame runs a compiled module so the
+      // binding contract is exercised without a live iframe.
+      // eslint-disable-next-line no-eval
+      const bound = eval(wrapper);
+      expect(bound).toBe(Callout);
+    } finally {
+      delete (globalThis as unknown as { __tw?: unknown }).__tw;
+    }
   });
 });
 

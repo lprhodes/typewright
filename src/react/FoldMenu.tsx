@@ -186,7 +186,7 @@ export function FoldMenu(props: FoldMenuProps): React.JSX.Element | null {
         onClick={run(onToggleFold)}
       >
         <span className="tw-fm-chk" aria-hidden="true" />
-        <span className="tw-fm-lab">{folded ? 'Unfold Section' : 'Fold Section'}</span>
+        <span className="tw-fm-lab">Toggle Folding</span>
       </button>
       <button
         ref={setRef(LEVELS.length + 1)}

@@ -166,6 +166,33 @@ export function dispatchInbound(
   }
 }
 
+/**
+ * Build the frame-bound payload for an `evaluate` request. The host component
+ * map travels under `props.components` — the single standardized field that the
+ * in-frame `runModule` reads to bind the module's `components` (see
+ * {@link MODULE_BINDINGS} and the dispatch in {@link SANDBOX_BOOTSTRAP}).
+ * Centralizing the shape here keeps the sender and the frame in agreement and
+ * makes the wiring unit-testable without a live iframe.
+ */
+export function buildEvaluateMessage(
+  code: string,
+  props?: Record<string, unknown>,
+): { code: string; props: Record<string, unknown> } {
+  return { code, props: props ?? {} };
+}
+
+/**
+ * The lexical bindings every compiled module closes over, injected verbatim as
+ * the head of the in-frame module wrapper (see {@link SANDBOX_BOOTSTRAP}).
+ * Notably it binds `components` ← `self.__tw.components` (the host's component
+ * map), which the constrained transform relies on (`const Callout =
+ * components["Callout"]`). Exported so the binding contract is unit-testable
+ * against the exact source the frame runs — no drift.
+ */
+export const MODULE_BINDINGS =
+  'var h=self.__tw.h,host=self.__tw.host,components=self.__tw.components,' +
+  'props=self.__tw.props,root=document.getElementById("tw-root");';
+
 /** The strict base CSP for the sandbox document; `extra` is appended. */
 export function buildSandboxCsp(extra?: string): string {
   const base =
@@ -328,7 +355,7 @@ export function createSandbox(opts: CreateSandboxOptions = {}): SandboxControlle
 
   return {
     async evaluate(code, props) {
-      const r = await request('evaluate', { code, props: props ?? {} });
+      const r = await request('evaluate', buildEvaluateMessage(code, props));
       return { html: r.html, height: r.height, error: r.error };
     },
     async renderMermaid(src) {
@@ -442,8 +469,7 @@ const SANDBOX_BOOTSTRAP = `
     // textContent — not innerHTML — makes any '</script>' in code inert.
     var wrapped =
       '"use strict";(function(){' +
-      'var h=self.__tw.h,host=self.__tw.host,components=self.__tw.components,' +
-      'props=self.__tw.props,root=document.getElementById("tw-root");' +
+      '${MODULE_BINDINGS}' +
       'try{var __out=(function(){' + code + '\\n})();self.__tw.done(' + id + ',__out);}' +
       'catch(__e){self.__tw.error(' + id + ',__e);}})();';
     var s = document.createElement('script');
@@ -480,7 +506,9 @@ const SANDBOX_BOOTSTRAP = `
     if (event.source !== parent) return;           // only the host frame
     var data = event.data;
     if (!data || typeof data !== 'object' || data.token !== TOKEN) return; // token gate
-    if (data.type === 'evaluate') runModule(data.id, data.code, data.props, data.components);
+    // The host component map travels under props.components (see
+    // buildEvaluateMessage); bind it as the module components map.
+    if (data.type === 'evaluate') runModule(data.id, data.code, data.props, data.props && data.props.components);
     else if (data.type === 'mermaid') renderMermaid(data.id, data.src);
   });
 
