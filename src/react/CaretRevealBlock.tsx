@@ -210,23 +210,16 @@ function flattenText(root: Node): Text[] {
 }
 
 /**
- * Reconstruct the block source from `root` (the DOM is the truth). Text nodes
- * contribute their data; a `<br>` a browser may materialize for a newline counts
- * as `\n` so the committed source matches what the user sees regardless of how the
- * engine represents the break. (Our own edits insert literal `\n` text nodes — see
- * `insertPlainText` — so `<br>` handling is belt-and-braces for engine quirks.)
+ * Reconstruct the block source from `root`'s text nodes (the DOM is the truth).
+ * Text-node-only, so it stays in the SAME length space as `offsetOfPoint` /
+ * `pointAtOffset` (which also walk text nodes) — a browser-injected placeholder
+ * `<br>` in an emptied block represents zero source characters and is ignored,
+ * matching those mappers. Our own newline edits insert literal `\n` text nodes
+ * (see `insertPlainText`), so no legitimate `<br>` newline is ever produced.
  */
 export function reconstructSource(root: Node): string {
-  const doc = root.ownerDocument;
-  if (!doc) return '';
-  const w = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
   let s = '';
-  let n = w.nextNode();
-  while (n) {
-    if (n.nodeType === 3) s += (n as Text).data;
-    else if ((n as Element).tagName === 'BR') s += '\n';
-    n = w.nextNode();
-  }
+  for (const t of flattenText(root)) s += t.data;
   return s;
 }
 
@@ -530,8 +523,9 @@ export function CaretRevealBlock(props: CaretRevealBlockProps): React.ReactEleme
     if (domSrc.length > committed.length && domSrc.startsWith(committed) && src.startsWith(domSrc, b.from)) {
       const sel = readSelection();
       paint(b, src, null);
-      // The caret may have been in the tail (now a sibling); clamp to this block.
-      if (sel) restoreCaret(Math.min(sel.to, committed.length));
+      // The caret may have been in the tail (now a sibling); clamp to this block's
+      // end. sel.to and b.to are both DOCUMENT offsets (restoreCaret expects one).
+      if (sel) restoreCaret(Math.min(sel.to, b.to));
     }
   }, [paint, readSelection, restoreCaret]);
 
