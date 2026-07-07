@@ -503,7 +503,9 @@ function applyDecorations(
 ): void {
   clearDecorations(container);
 
-  const blockEls = Array.from(container.querySelectorAll<HTMLElement>('.tw-block[data-tw-from]'));
+  const blockEls = Array.from(
+    container.querySelectorAll<HTMLElement>('.tw-block[data-tw-from], .tw-caret-block[data-tw-from]'),
+  );
   const scopes: { el: HTMLElement; from: number; to: number }[] =
     blockEls.length > 0
       ? blockEls.map((el) => ({
@@ -516,6 +518,12 @@ function applyDecorations(
   let flashTarget: HTMLElement | null = null;
 
   for (const scope of scopes) {
+    // Never inject <mark>/cursor spans into a live contentEditable caret-reveal
+    // block: it would corrupt the block's DOM↔source offset mapping and be
+    // clobbered by its next repaint. Anchors still resolve (data-tw-from), so a
+    // new comment anchors to the right range; the inline highlight/cursor simply
+    // isn't drawn inside a caret surface.
+    if (scope.el.getAttribute('contenteditable') === 'true' || scope.el.isContentEditable) continue;
     const scopeText = scope.el.textContent ?? '';
     for (const dec of decorations) {
       // Only decorate blocks the anchor overlaps.
@@ -677,7 +685,7 @@ function useCollab(
       const host = anchorNode instanceof Element ? anchorNode : anchorNode.parentElement;
       if (host?.closest('.tw-selpop, .tw-composer, .tw-comments-sidebar')) return;
 
-      const blockEl = host?.closest<HTMLElement>('.tw-block[data-tw-from]');
+      const blockEl = host?.closest<HTMLElement>('.tw-block[data-tw-from], .tw-caret-block[data-tw-from]');
       const from = blockEl ? Number(blockEl.getAttribute('data-tw-from')) || 0 : 0;
       const to = blockEl ? Number(blockEl.getAttribute('data-tw-to')) || 0 : srcRef.current.length;
       const blockSrc = srcRef.current.slice(from, to);

@@ -209,10 +209,24 @@ function flattenText(root: Node): Text[] {
   return out;
 }
 
-/** Reconstruct the block source from `root`'s text nodes (the DOM is the truth). */
+/**
+ * Reconstruct the block source from `root` (the DOM is the truth). Text nodes
+ * contribute their data; a `<br>` a browser may materialize for a newline counts
+ * as `\n` so the committed source matches what the user sees regardless of how the
+ * engine represents the break. (Our own edits insert literal `\n` text nodes — see
+ * `insertPlainText` — so `<br>` handling is belt-and-braces for engine quirks.)
+ */
 export function reconstructSource(root: Node): string {
+  const doc = root.ownerDocument;
+  if (!doc) return '';
+  const w = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
   let s = '';
-  for (const t of flattenText(root)) s += t.data;
+  let n = w.nextNode();
+  while (n) {
+    if (n.nodeType === 3) s += (n as Text).data;
+    else if ((n as Element).tagName === 'BR') s += '\n';
+    n = w.nextNode();
+  }
   return s;
 }
 
@@ -497,12 +511,28 @@ export function CaretRevealBlock(props: CaretRevealBlockProps): React.ReactEleme
     const root = rootRef.current;
     if (!root || composingRef.current || !editingRef.current) return;
     const { block: b, source: src } = propsRef.current;
-    // Only re-tokenise once the props reflect the DOM, so a not-yet-committed
-    // keystroke is never clobbered by a stale re-paint.
-    if (src.slice(b.from, b.to) !== reconstructSource(root)) return;
-    const sel = readSelection();
-    paint(b, src, sel);
-    if (sel) restoreCaret(sel.to);
+    const committed = src.slice(b.from, b.to);
+    const domSrc = reconstructSource(root);
+    if (committed === domSrc) {
+      // Normal settle: props reflect the DOM → re-tokenise + restore caret.
+      const sel = readSelection();
+      paint(b, src, sel);
+      if (sel) restoreCaret(sel.to);
+      return;
+    }
+    // Split case: the edit inserted a block boundary (e.g. a blank line), so this
+    // block's committed extent shrank while the DOM still holds the whole typed
+    // text; the tail now belongs to freshly-parsed sibling blocks. Detect it by:
+    // the block's committed text is a prefix of the DOM source, the DOM is longer,
+    // and that longer DOM matches the source from this block onward. Repaint to the
+    // block's own extent so the trailing content isn't duplicated (it renders in the
+    // sibling). Any other mismatch is a not-yet-committed keystroke → wait.
+    if (domSrc.length > committed.length && domSrc.startsWith(committed) && src.startsWith(domSrc, b.from)) {
+      const sel = readSelection();
+      paint(b, src, null);
+      // The caret may have been in the tail (now a sibling); clamp to this block.
+      if (sel) restoreCaret(Math.min(sel.to, committed.length));
+    }
   }, [paint, readSelection, restoreCaret]);
 
   const scheduleSettle = React.useCallback((): void => {
@@ -572,11 +602,19 @@ export function CaretRevealBlock(props: CaretRevealBlockProps): React.ReactEleme
       if (settleTimer.current != null) win.clearTimeout(settleTimer.current);
       if (revealTimer.current != null) win.clearTimeout(revealTimer.current);
     }
+    // Flush any DOM edit not yet in the model before we repaint. During IME the
+    // composed text lives only in the DOM (onInput is suppressed); if a blur
+    // interrupts the composition, syncModel here commits it so it isn't lost. On
+    // engines where compositionend fires after blur, its later syncModel is a
+    // no-op (DOM already matches). Clearing composingRef defensively prevents a
+    // stuck composition from silently suppressing later input on a reused instance.
+    syncModel();
+    composingRef.current = false;
     // Repaint the resting, fully-rendered look from the committed props.
     const { block: b, source: src } = propsRef.current;
     builtKeyRef.current = null;
     paint(b, src, null);
-  }, [paint]);
+  }, [paint, syncModel]);
 
   const onInput = React.useCallback((): void => {
     if (composingRef.current) return;
@@ -605,8 +643,25 @@ export function CaretRevealBlock(props: CaretRevealBlockProps): React.ReactEleme
     if (e.key === 'Enter') {
       e.preventDefault();
       insertPlainText(e.currentTarget, '\n');
+      return;
     }
-  }, [readOnly]);
+    // Backspace at the very start of a block deletes the block separator before
+    // it, merging this block into the previous one — the separator belongs to no
+    // block, so the browser's default Backspace is a no-op here. Emit a
+    // document-scoped splice removing the preceding whitespace/blank-line run.
+    if (e.key === 'Backspace') {
+      const sel = readSelection();
+      const { block: b, source: src } = propsRef.current;
+      if (sel && sel.from === sel.to && sel.from === b.from && b.from > 0 && !composingRef.current) {
+        let sepStart = b.from;
+        while (sepStart > 0 && (src[sepStart - 1] === '\n' || src[sepStart - 1] === ' ' || src[sepStart - 1] === '\t')) sepStart--;
+        if (sepStart < b.from) {
+          e.preventDefault();
+          onChangeRef.current({ from: sepStart, to: b.from, insert: '' });
+        }
+      }
+    }
+  }, [readOnly, readSelection]);
 
   const onPaste = React.useCallback((e: React.ClipboardEvent<HTMLDivElement>): void => {
     if (readOnly) return;
@@ -652,7 +707,11 @@ function insertPlainText(root: HTMLElement, text: string): void {
   // `execCommand` keeps undo history + fires `input`; guard for environments
   // (jsdom) where it is absent — the caret-sync path still runs on `input`.
   const exec = (doc as unknown as { execCommand?: (c: string, s: boolean, v: string) => boolean } | undefined)?.execCommand;
-  if (doc && typeof exec === 'function') {
+  // For newlines, always use manual text-node insertion: execCommand may
+  // materialize a <br>/<div> the source reconstruction can't map, dropping the
+  // newline. A literal `\n` text node (the surface is white-space:pre-wrap) is
+  // seen identically by reconstructSource and offsetOfPoint.
+  if (!text.includes('\n') && doc && typeof exec === 'function') {
     try {
       if (exec.call(doc, 'insertText', false, text)) return;
     } catch {

@@ -160,6 +160,66 @@ test('caret stability: clicking rendered text inserts at that spot, not block st
   expect(src.slice(0, idx) + src.slice(idx + 1)).toBe(doc);
 });
 
+test('splitting a focused caret block by a blank line does NOT duplicate the trailing text', async ({ page }) => {
+  // Regression for the acceptance-review finding: pressing Enter twice inside a
+  // focused caret block used to render the trailing content twice on screen until
+  // blur (the focused element kept its stale DOM while a new sibling also mounted).
+  const editor = page.getByTestId('editor');
+  await loadCaretDoc(page, 'Alpha keyword omega.\n\nSecond block.');
+
+  const first = editor.locator('[data-typewright="caret-block"]').first();
+  await first.click();
+  // Place a collapsed caret right after "Alpha " (offset 6) via a Range, then
+  // split the paragraph with a blank line — without blurring.
+  await page.evaluate(() => {
+    const el = document.querySelector('[data-typewright="caret-block"]') as HTMLElement;
+    const t = el.firstChild as Text; // leading content text node
+    const r = document.createRange();
+    r.setStart(t, 6);
+    r.collapse(true);
+    const s = window.getSelection()!;
+    s.removeAllRanges();
+    s.addRange(r);
+  });
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Enter');
+
+  // Still focused (no blur): the trailing fragment must appear in exactly ONE
+  // on-screen caret block, not two.
+  await expect(
+    editor.locator('[data-typewright="caret-block"]', { hasText: 'keyword omega' }),
+  ).toHaveCount(1);
+  // And the document split correctly (source round-trips, markers/text intact).
+  const src = await readSource(page);
+  expect(src).toContain('keyword omega.');
+  expect(src.split('keyword omega').length - 1).toBe(1); // exactly one occurrence
+});
+
+test('Backspace at a caret block start merges it into the previous block', async ({ page }) => {
+  const editor = page.getByTestId('editor');
+  await loadCaretDoc(page, 'First para.\n\nSecond para.');
+
+  const second = editor.locator('[data-typewright="caret-block"]').nth(1);
+  await second.click();
+  // Collapse the caret to the very start of the second block, then Backspace.
+  await page.evaluate(() => {
+    const blocks = document.querySelectorAll('[data-typewright="caret-block"]');
+    const el = blocks[1] as HTMLElement;
+    const t = el.firstChild as Text;
+    const r = document.createRange();
+    r.setStart(t, 0);
+    r.collapse(true);
+    const s = window.getSelection()!;
+    s.removeAllRanges();
+    s.addRange(r);
+  });
+  await page.keyboard.press('Backspace');
+
+  // The blocks merged: the inter-block blank line is gone from the source.
+  const src = await readSource(page);
+  expect(src).toBe('First para.Second para.');
+});
+
 test('IME/composition commits the composed text to the source (CDP)', async ({ page }) => {
   // Coverage note (honest): this drives Chromium's real composition path via CDP
   // (Input.imeSetComposition → Input.insertText, the emoji/IME-keyboard commit).
