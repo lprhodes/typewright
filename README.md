@@ -27,13 +27,17 @@ Zero-runtime-dependency engine · Obsidian-style unified live preview · semanti
 > and **threshold-gated virtualization** — with a reproducible **benchmark
 > harness** ([docs/BENCHMARKS.md](./docs/BENCHMARKS.md)) and a gzip **size budget**.
 >
-> **Two things are honestly not done yet** (see [FEATURES.md](./docs/FEATURES.md)):
-> (1) unified mode reveals raw Markdown at the **block** level (click-to-edit),
-> not yet the Obsidian-exact **per-caret** reveal; and (2) editing uses native
-> `<textarea>` surfaces — which handle **IME/composition correctly** — rather than
-> the SPEC §4.4 **custom hidden-sink** input substrate. The custom sink is the
-> prerequisite for per-caret reveal, and both remain roadmap. The public API
-> (`src/types.ts`) is stable and semver-versioned.
+> **v0.2.1 closes the remaining items:** the Obsidian-exact **per-caret marker
+> reveal** now ships as an opt-in mode (`unifiedReveal: 'caret'`) — a managed
+> `contentEditable` surface that reveals only the markers around the caret;
+> block-level stays the default. IME/composition works through the platform
+> (`contentEditable`/native textareas), so the SPEC §4.4 hidden-sink is a
+> **documented architectural divergence**, not a gap. Also shipped: the published
+> **CodeMirror-6 baseline**, an **axe-core a11y sweep**, and **reparse-span
+> tightening** (mid-doc large-file keystrokes). Documented coverage boundaries: the
+> deep CJK/dead-key/soft-keyboard IME tail and Home/End line-nav in the caret
+> surface are exercised as far as headless e2e reaches, not exhaustively. The
+> public API (`src/types.ts`) is stable and semver-versioned.
 
 ---
 
@@ -48,7 +52,7 @@ The result is designed to win where it matters: **keystroke-to-paint latency on 
 ## Highlights
 
 - ⚡ **From-scratch, zero-runtime-dependency engine.** String-is-state model, viewport-virtualized DOM rendering, hand-written incremental block parser with exact source offsets.
-- 👁 **Unified source-revealing mode.** Formatting renders inline; click any block to reveal and edit its raw Markdown (`**`, `` ` ``, `#`) in place, then blur to re-render — the Obsidian "Live Preview" idiom, native rather than bolted on. (Per-**caret** marker reveal is the next step on this — see [FEATURES.md](./docs/FEATURES.md).)
+- 👁 **Unified source-revealing mode.** Formatting renders inline; click any block to reveal and edit its raw Markdown (`**`, `` ` ``, `#`) in place, then blur to re-render — the Obsidian "Live Preview" idiom, native rather than bolted on. (Per-**caret** reveal ships opt-in via `unifiedReveal:'caret'` — see [FEATURES.md](./docs/FEATURES.md).)
 - 🧩 **Full GFM + MDX v3.** Tables, task lists, strikethrough, autolinks, footnotes; MDX JSX, ESM `import`/`export`, and `{expressions}`.
 - 🌊 **Streaming preview with formatting anticipation.** Feed it an LLM token stream and it renders word-by-word while *predicting* incomplete formatting — a partial `*bo` shows as in-progress bold, an unterminated fence opens a code block, partial JSX renders a component skeleton. ([demo pattern](https://elements.ai-sdk.dev/components/jsx-preview))
 - 📁 **Semantic heading folding.** Fold a section and everything under it collapses to the next same-or-higher heading, with an H1–H6 fold menu and fold/unfold-all.
@@ -153,7 +157,7 @@ Typewright is being built spec-first. See **[SPEC.md](./SPEC.md)** for the archi
 3. ✅ **Rich editing** — in-place tables, native syntax highlighting, Mermaid, math (engines host-supplied).
 4. ✅ **MDX** — markup parser, wasm transform boundary, sandboxed execution.
 5. ✅ **Streaming** — the anticipation engine (links/lists/tables/smoothing) + partial JSX.
-6. 🟡 **Hardening** — comments/presence, benchmarks and gzip size budget shipped; **remaining:** the SPEC §4.4 custom input substrate (native textareas handle IME today), per-caret marker reveal, reparse-span tightening for mid-doc 1 MB edits, and the published CodeMirror-6 baseline + full axe-core sweep (harnesses exist; see BENCHMARKS.md).
+6. ✅ **Hardening** — comments/presence, benchmarks + gzip size budget, opt-in per-caret marker reveal (contentEditable; IME via the platform), reparse-span tightening for mid-doc large-file edits, the published CodeMirror-6 baseline, and an axe-core a11y sweep are all shipped. The SPEC §4.4 custom hidden-sink is a documented architectural divergence (the per-caret + IME goals are met via contentEditable), not a remaining gap.
 
 ## Contributing
 

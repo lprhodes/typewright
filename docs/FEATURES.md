@@ -18,10 +18,10 @@ built) and [spec-TW-0001.md](./specs/spec-TW-0001.md) (the feature spec).
 | **MDX** | Markup recognized (JSX / ESM / expressions) | ✅ |
 | | Component **execution** (sandboxed iframe) | ✅ |
 | **Live preview** | Unified block-level editing (click to reveal source) | ✅ |
-| | Character-level inline marker reveal (Obsidian-exact, per-caret) | 🟡 |
+| | Character-level inline marker reveal (Obsidian-exact, per-caret) | ✅ |
 | **Toolbar** | Built-in formatting toolbar (docked / floating) + command engine | ✅ |
 | **Keyboard** | Standard text-editing shortcuts + rebindable keymap + ⌘K palette | ✅ |
-| | Custom IME input substrate (SPEC §4.4 hidden sink) | 🟡 |
+| | IME / composition (native `<textarea>` + contentEditable) | ✅ |
 | **Folding** | Semantic heading section folding | ✅ |
 | | Fold menu (set H1–H6, fold-all, copy-link) + `persistKey` | ✅ |
 | **Tables** | GFM table parse + render + source edit | ✅ |
@@ -50,7 +50,7 @@ One editor, four modes (the `mode` prop), all over the same Markdown string (the
 
 Controlled (`value` + `onChange`) or uncontrolled (`defaultValue`). Emits `onChange(value, change)` and `onSelectionChange(selection)`.
 
-> 🟡 **Honest status — marker reveal granularity.** Unified mode today reveals raw Markdown at the **block** level (click a block → its source appears in an inline editor). The Obsidian-exact **per-caret** reveal — where only the markers immediately around the caret (`**`, `` ` ``, `#`) surface while the rest of the line stays rendered — is *partial*: the marker-range algorithm (`hiddenMarkers`) exists and is tested, but wiring it to a live custom caret depends on the custom input substrate below (§5) and is roadmap work. Preview mode stays block-edit **by design**.
+> ✅ **Marker reveal granularity — both modes shipped.** Unified mode's default is **block**-level reveal (click a block → its source appears in an inline editor). The Obsidian-exact **per-caret** reveal — only the markers immediately around the caret (`**`, `*`, `` ` ``, `#`, `[]()`, fences, blockquotes) surface while the rest of the line stays rendered — is now shipped as an **opt-in** mode: set `unifiedReveal: 'caret'`. It is a managed `contentEditable` surface driving the tested `hiddenMarkers` algorithm, with a click-settle debounce; the string stays canonical throughout. Block-level stays the default (and the fallback). Preview mode stays block-edit **by design**. *Coverage honesty:* the per-caret surface is exercised end-to-end in the e2e suite (reveal/hide, click caret placement, typing round-trip, block split/merge, IME commit); the deep CJK candidate-window / dead-key / soft-keyboard tail and Home/End line-nav in the caret surface are the documented coverage boundary, not exhaustively driven.
 
 ## 2. Markdown — CommonMark + GFM ✅
 
@@ -84,7 +84,7 @@ Each command (`core/commands.ts` → `applyCommand(text, selection, command)`) i
 
 Standard text-editing shortcuts in any editing surface: `⌘/Ctrl+B` bold, `⌘/Ctrl+I` italic, `⌘/Ctrl+K` link, `⌘/Ctrl+E` inline code — plus native selection, undo/redo, and caret motion. ✅ The **rebindable keymap** ([`KeymapOptions`](../src/types.ts)) is live — `keymap.preset` (incl. `'none'` to disable) + per-command `bindings` overrides — and every shortcut now routes through the same tested command engine as the toolbar (no more double-wrap on repeat). A **⌘K command palette** enumerates and runs every command (§ Settings). 
 
-**IME / composition** is handled correctly today by the **native `<textarea>` editing surfaces** — composition, dead keys and CJK input all work through the platform text-input layer. 🟡 The SPEC §4.4 **custom hidden-sink input substrate** (a single positioned hidden sink driving a fully custom caret/selection view) is *not* the current mechanism — editing uses native textareas per block rather than the bespoke sink. This is a deliberate, correct-for-IME choice for v0.2; the custom substrate remains roadmap work (it is what unlocks per-caret reveal in §Live preview).
+**IME / composition** is handled correctly through the **platform text-input layer**: block-level editing uses native `<textarea>` surfaces, and the opt-in per-caret reveal surface uses a managed `contentEditable` (composition is suppressed during `compositionstart`→`compositionend` and committed once on end — never reimplemented). Composition, dead keys and CJK input work in both. ✅ **Design note:** the SPEC §4.4 *hidden-sink* architecture (a single positioned hidden sink driving a fully custom caret) is **deliberately not** how this is built — `contentEditable` and native textareas route composition through the platform for free, which is the correct-for-IME choice; the user-facing goals (per-caret reveal + working IME) are delivered without the bespoke sink. This is a documented architectural divergence, not a gap.
 
 ## 6. Section folding ✅
 
@@ -151,6 +151,7 @@ import { TypewrightEditor } from 'typewright';
 | `onChange` | `(value, change) => void` | Fires on every edit. |
 | `onSelectionChange` | `(selection) => void` | |
 | `mode` | `'edit' \| 'unified' \| 'preview' \| 'read'` | Default `'unified'`. |
+| `unifiedReveal` | `'block' \| 'caret'` | Unified-mode reveal granularity. Default `'block'` (click a block to edit its source); `'caret'` = per-marker reveal around the caret (opt-in, contentEditable). |
 | `toolbar` | `boolean \| 'docked' \| 'floating'` | Built-in formatting toolbar. |
 | `folding` | `boolean \| FoldingOptions` | Heading folding (default on). |
 | `theme` | `{ appearance?, tokens? }` | `'light' \| 'dark' \| 'auto'`. |
@@ -231,14 +232,16 @@ Modern browsers and Electron (web + desktop). The headless core runs anywhere (i
 
 ## Roadmap
 
-v0.2 (this release) shipped the previously-deferred surfaces: comments & presence, settings + ⌘K palette, native syntax colouring, sandboxed MDX execution, Mermaid + math engine hooks, the in-place table grid, the fold menu, footnotes + definition lists, streaming link/list/table anticipation + smoothing, the incremental parser, and threshold-gated virtualization — plus the benchmark harness and gzip size budget.
+v0.2 shipped the previously-deferred surfaces: comments & presence, settings + ⌘K palette, native syntax colouring, sandboxed MDX execution, Mermaid + math engine hooks, the in-place table grid, the fold menu, footnotes + definition lists, streaming link/list/table anticipation + smoothing, the incremental parser, and threshold-gated virtualization — plus the benchmark harness and gzip size budget.
 
-**What genuinely remains** (the two honest 🟡 rows above, and the follow-through):
+**v0.2.1 (this release) closed the remaining items:**
 
-1. **Custom input substrate (SPEC §4.4).** Replace the per-block native `<textarea>` surfaces with a single hidden input sink driving a fully custom caret/selection view. Native textareas already handle IME/composition correctly, so this is not an IME fix — it is the substrate the next item needs.
-2. **Character-level (per-caret) marker reveal.** With the custom sink in place, reveal only the markers around the caret rather than exposing a whole block's source on click. The marker-range algorithm (`hiddenMarkers`) is already built and tested; this is the view work to render it live.
-3. **Reparse-span tightening** — stop the incremental reparse at the next safe block boundary after the edit instead of running to end-of-document, to pull the mid-document 1 MB keystroke under the SPEC §10 budget (see [BENCHMARKS.md](./BENCHMARKS.md)).
-4. **Published competitor baseline + full a11y sweep** — run the CodeMirror-6 / Lezer bench baseline and the automated axe-core pass over every surface in the e2e phase (harnesses exist; see BENCHMARKS.md).
+1. **Character-level (per-caret) marker reveal — shipped, opt-in** (`unifiedReveal: 'caret'`). A managed `contentEditable` surface renders the tested `hiddenMarkers` algorithm live: only the markers around the caret surface; block-level stays the default. IME/composition works through the platform (`contentEditable`), so the SPEC §4.4 hidden-sink is a **documented architectural divergence**, not a gap — the user-facing goal is delivered.
+2. **Reparse-span tightening — shipped.** The incremental reparse now bounds to the dirty block(s) + a safe look-around and re-offsets the reused suffix (a top-of-doc edit reparses O(edited block), not the whole tail), still proven deep-equal to a full parse by the property oracle. See [BENCHMARKS.md](./BENCHMARKS.md).
+3. **Published competitor baseline — shipped.** A real CodeMirror-6 / Lezer cold-parse baseline runs over the same fixtures; numbers are published in [BENCHMARKS.md](./BENCHMARKS.md) (Typewright is ~4–8× faster on cold parse; honestly caveated as batch parse, not the keystroke-to-paint headline metric).
+4. **Accessibility sweep — shipped.** An automated `axe-core` pass runs over every surface (all editor modes incl. caret-reveal, toolbar, comments sidebar, settings panel, ⌘K palette, fold menu, table grid) in the e2e suite with zero serious/critical violations; two real violations it surfaced (task-checkbox labels, a nested-interactive block role) were fixed.
+
+**Documented coverage boundaries** (honest, not gaps that break anything): the per-caret surface's deep CJK candidate-window / dead-key / soft-keyboard tail and Home/End line-nav are exercised as far as headless e2e reaches, not exhaustively; comment highlights are not *drawn* inline inside a focused caret block (the thread still anchors correctly and shows in the sidebar).
 
 The [design prototype](../demo/design-prototype.html) shows the full intended experience.
 
