@@ -17,7 +17,9 @@
  *    degrade to text (or run to end-of-input) rather than failing.
  */
 
+import { walk } from './ast';
 import type {
+  AstNode,
   Autolink,
   Block,
   Blockquote,
@@ -1247,9 +1249,17 @@ export function parse(src: string, options?: ParseOptions): Document {
  * the source PREFIX before the reparse cut, and that prefix is byte-identical in
  * `prevSrc` and `nextSrc` (the edit is entirely at/after the cut). Whenever a safe
  * cut cannot be cheaply proven, we fall back to a full `parse` — a correct result
- * is never sacrificed for a fast one. The reparse always runs to end-of-document,
- * so nodes after the edit are freshly built (never re-offset), keeping offsets
- * exact without a shift pass. The one-way property test in
+ * is never sacrificed for a fast one.
+ *
+ * When possible the reparse is ALSO bounded on the RIGHT: rather than reparsing
+ * from the cut to end-of-document, we reparse only the dirty block(s) plus a safe
+ * look-around, then reuse the unchanged SUFFIX blocks from `prev`, re-offset by the
+ * edit's length delta. That suffix reuse is only taken when a clean, self-terminated
+ * dirty-region boundary can be PROVEN by a small bounded reparse that includes the
+ * join line (an open fence / list / etc. that would bleed past the join makes the
+ * proof fail, and we fall back to the reparse-to-EOF path — still correct, just less
+ * tight). A small edit near the TOP of a large document therefore reparses a bounded
+ * region instead of the whole tail. The one-way property test in
  * `parser.incremental.test.ts` is the oracle that enforces the deep-equality.
  * ------------------------------------------------------------------ */
 
@@ -1261,6 +1271,14 @@ export interface IncrementalStats {
   reusedBlocks: number;
   /** Line index in `nextSrc` from which blocks were reparsed (0 ⇒ whole document). */
   reparsedFromLine: number;
+  /**
+   * Line index in `nextSrc` at which the reparsed region ENDS (exclusive). Equals
+   * {@link totalLines} when the reparse ran to end-of-document (no suffix reuse); a
+   * value `< totalLines` means the tail was bounded and trailing blocks were reused.
+   */
+  reparsedToLine: number;
+  /** Count of trailing top-level blocks reused from `prev` (re-offset by the edit delta). */
+  reusedSuffixBlocks: number;
   /** Total number of content lines in `nextSrc`. */
   totalLines: number;
 }
@@ -1320,6 +1338,40 @@ function prevLineIsBlank(src: string, lineStart: number): boolean {
   return src.slice(start, end).trim() === '';
 }
 
+/**
+ * Like {@link prevLineIsBlank}, but ALSO requires the blank line to lie entirely at
+ * or after `minStart` — i.e. wholly inside the source region the edit did not touch.
+ * Used to prove a suffix-join boundary sits behind an unchanged blank separator, so
+ * no construct can lazily bridge the reparsed dirty region into the reused suffix.
+ */
+function blankLineFullyAfter(src: string, lineStart: number, minStart: number): boolean {
+  if (lineStart <= 0) return false;
+  const end = lineStart - 1; // the '\n' that terminated the previous line
+  let start = end - 1;
+  while (start >= 0 && src[start] !== '\n') start--;
+  start += 1;
+  if (start < minStart) return false; // blank line straddles / precedes the edit
+  return src.slice(start, end).trim() === '';
+}
+
+/**
+ * Deep-clone a block, shifting every `from`/`to` (and `contentFrom`, where present)
+ * by `delta`. Used to re-offset an unchanged SUFFIX block reused from `prev` into
+ * `nextSrc` coordinates without reparsing it. Walks the WHOLE subtree (nested
+ * blocks, inline children, table cells, list/def items) via the shared {@link walk},
+ * so no offset-bearing node is missed. `prev` is never mutated.
+ */
+function shiftBlock(block: Block, delta: number): Block {
+  const clone = structuredClone(block) as Block;
+  walk(clone as AstNode, (n) => {
+    const p = n as { from: number; to: number; contentFrom?: number };
+    p.from += delta;
+    p.to += delta;
+    if (typeof p.contentFrom === 'number') p.contentFrom += delta;
+  });
+  return clone;
+}
+
 /** Index of the line in `lines` that begins exactly at offset `off`, or -1. */
 function lineStartingAt(lines: Line[], off: number): number {
   let lo = 0;
@@ -1351,6 +1403,85 @@ function lastBlockAtOrBefore(blocks: Block[], off: number): number {
   return ans;
 }
 
+/** A proven bounded reparse: the freshly parsed dirty blocks + the reused, re-offset suffix. */
+interface SuffixReuse {
+  /** Freshly parsed dirty blocks, already carrying absolute `nextSrc` offsets. */
+  dirty: Block[];
+  /** Trailing blocks reused from `prev`, re-offset by the edit delta. */
+  shifted: Block[];
+  /** Line index in `nextSrc` at which the reparsed dirty region ends (exclusive). */
+  endLine: number;
+  /** Count of reused suffix blocks. */
+  count: number;
+}
+
+/** Cap on how many join candidates we probe before giving up (bounds worst-case cost). */
+const MAX_JOIN_ATTEMPTS = 4;
+
+/**
+ * Try to bound the reparse on the RIGHT so a small edit near the top of a large doc
+ * does not reparse the whole tail. Given the prefix cut (`cLine`/`k` already chosen),
+ * find a prev block boundary AFTER the change whose reuse can be PROVEN sound, reparse
+ * only `[cLine, joinLine)`, and reuse the trailing prev blocks re-offset by `delta`.
+ *
+ * Correctness rests on three facts:
+ *  1. Suffix content is byte-identical (shifted by `delta`) — guaranteed by only
+ *     considering join offsets `>= to` (everything at/after the edit is unchanged).
+ *  2. `parseBlocks` is strictly left-to-right, so the reused suffix `blocks[j..]`
+ *     equals `parseBlocks(nextLines.slice(joinLine))` shifted — *provided* a real
+ *     block boundary exists at the join in the full parse of `nextSrc`.
+ *  3. That boundary is PROVEN by a bounded reparse that includes the join line: if
+ *     a block starts exactly at the join offset, no open construct (fence, list,
+ *     indented code, …) from the dirty region bled across it. If the proof fails we
+ *     return `null` and the caller falls back to reparse-to-EOF (still correct).
+ * `opts` must already be set for `parseBlocks`.
+ */
+function tryReuseSuffix(
+  blocks: Block[],
+  prevSrc: string,
+  to: number,
+  delta: number,
+  nextLines: Line[],
+  cLine: number,
+): SuffixReuse | null {
+  // Last prev block starting at/before the change end — the dirty region covers it;
+  // the first reuse candidate is the block after it.
+  const dEnd = lastBlockAtOrBefore(blocks, to);
+  let attempts = 0;
+  for (let j = dEnd + 1; j < blocks.length; j++) {
+    const joinOff = blocks[j]!.from;
+    if (joinOff < to) continue; // suffix must be entirely in the unchanged region
+    // A blank line wholly inside the unchanged region must precede the join, so no
+    // lazily-continuing construct can bridge the dirty region into the suffix.
+    if (!blankLineFullyAfter(prevSrc, joinOff, to)) continue;
+    const nextJoinOff = joinOff + delta;
+    const joinLine = lineStartingAt(nextLines, nextJoinOff);
+    if (joinLine <= cLine) continue; // must reparse a non-empty region below the cut
+
+    if (++attempts > MAX_JOIN_ATTEMPTS) break; // bound the probing cost, then fall back
+
+    // Bounded, boundary-proving reparse: include the join line. A block starting
+    // exactly at `nextJoinOff` proves the dirty region self-terminates there.
+    const guard = parseBlocks(nextLines.slice(cLine, joinLine + 1));
+    const dirty: Block[] = [];
+    let proven = false;
+    for (const b of guard) {
+      if (b.from === nextJoinOff) {
+        proven = true;
+        break;
+      }
+      if (b.from > nextJoinOff) break; // overshot ⇒ no clean boundary here
+      dirty.push(b);
+    }
+    if (!proven) continue; // an open construct crossed the join — try the next candidate
+
+    const rest = blocks.slice(j);
+    const shifted = delta === 0 ? rest : rest.map((b) => shiftBlock(b, delta));
+    return { dirty, shifted, endLine: joinLine, count: rest.length };
+  }
+  return null;
+}
+
 function runIncremental(
   prev: Document,
   prevSrc: string,
@@ -1359,9 +1490,17 @@ function runIncremental(
   options: ParseOptions | undefined,
 ): IncrementalResult {
   const nextLines = splitLines(nextSrc);
+  const total = nextLines.length;
   const full = (): IncrementalResult => ({
     doc: parse(nextSrc, options),
-    stats: { fellBack: true, reusedBlocks: 0, reparsedFromLine: 0, totalLines: nextLines.length },
+    stats: {
+      fellBack: true,
+      reusedBlocks: 0,
+      reparsedFromLine: 0,
+      reparsedToLine: total,
+      reusedSuffixBlocks: 0,
+      totalLines: total,
+    },
   });
 
   // Normalize + validate the change against prevSrc. A malformed or inconsistent
@@ -1374,10 +1513,13 @@ function runIncremental(
   // prefix `[0, from)` is byte-identical proves every reused prefix identical.
   if (prevSrc.slice(0, from) !== nextSrc.slice(0, from)) return full();
 
+  // Offset shift applied to any source position at/after the edit end `to`.
+  const delta = change.insert.length - (to - from);
+
   const blocks = prev.children;
   const hi = Math.min(blocks.length - 1, lastBlockAtOrBefore(blocks, from));
   for (let k = hi; k >= 1; k--) {
-    const cut = blocks[k]!.from; // reuse blocks[0..k-1]; reparse from `cut` to EOF
+    const cut = blocks[k]!.from; // reuse blocks[0..k-1]; reparse from `cut`
     if (cut > from) continue; // head must lie entirely before the edit
     const safety = headSafety(blocks[k - 1]!);
     if (safety === 'never') continue;
@@ -1386,17 +1528,44 @@ function runIncremental(
     if (c < 0) continue; // `cut` is not a line start in nextSrc (should not happen)
 
     // The reparse runs `parseBlocks`, which reads the module-scoped `opts`; set
-    // them from `options` so the reparsed tail matches a full parse exactly.
+    // them from `options` so the reparsed region matches a full parse exactly.
     opts = {
       math: options?.math === true,
       footnotes: options?.footnotes === true,
       defLists: options?.defLists === true,
     };
+
+    // Try to bound the reparse on the right and reuse the unchanged suffix; this
+    // is what makes a top-of-doc edit cheap. If no clean boundary can be proven,
+    // fall back to reparsing the whole tail (still correct, just not as tight).
+    const suffix = tryReuseSuffix(blocks, prevSrc, to, delta, nextLines, c);
+    if (suffix) {
+      const children = blocks.slice(0, k).concat(suffix.dirty, suffix.shifted);
+      return {
+        doc: { type: 'document', from: 0, to: nextSrc.length, children },
+        stats: {
+          fellBack: false,
+          reusedBlocks: k,
+          reparsedFromLine: c,
+          reparsedToLine: suffix.endLine,
+          reusedSuffixBlocks: suffix.count,
+          totalLines: total,
+        },
+      };
+    }
+
     const tail = parseBlocks(nextLines.slice(c));
     const children = blocks.slice(0, k).concat(tail);
     return {
       doc: { type: 'document', from: 0, to: nextSrc.length, children },
-      stats: { fellBack: false, reusedBlocks: k, reparsedFromLine: c, totalLines: nextLines.length },
+      stats: {
+        fellBack: false,
+        reusedBlocks: k,
+        reparsedFromLine: c,
+        reparsedToLine: total,
+        reusedSuffixBlocks: 0,
+        totalLines: total,
+      },
     };
   }
   return full();

@@ -271,6 +271,20 @@ export interface SettingsOptions {
 export interface EditorConfig {
   value?: string;
   mode?: EditorMode;
+  /**
+   * How the raw syntax markers are revealed in `unified` mode.
+   *
+   * - `block`  (default) Click-to-reveal: clicking a rendered block swaps the
+   *            whole block for its raw Markdown source — today's behaviour.
+   * - `caret`  Per-marker reveal around the caret: only the markers the caret
+   *            sits on (a `**`, a `](url)`, a fence line, …) reveal, live, as
+   *            the caret moves. Opt-in; contentEditable-backed, with IME handled
+   *            by the platform's composition (not reimplemented).
+   *
+   * Additive and backward-compatible — omitting it keeps the `block` default,
+   * so existing embeds are unaffected.
+   */
+  unifiedReveal?: 'block' | 'caret';
   extensions?: Extensions;
   folding?: boolean | FoldingOptions;
   readOnly?: boolean;

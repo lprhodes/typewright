@@ -6,10 +6,11 @@ without a named workload and a named competitor is not shippable… published ev
 where targets are missed."*
 
 This page reports **real, reproduced Typewright numbers** for cold parse and the
-keystroke-triggered reparse, plus the **bundle-size budget**. The CodeMirror-6
-baseline column and the in-browser keystroke-to-paint (INP) number are harnessed
-and specified but marked **to be run** — see the notes at the bottom for exactly
-why and how.
+keystroke-triggered reparse, the **bundle-size budget**, and a **real cold-parse
+baseline against CodeMirror-6** (`@codemirror/lang-markdown`) on the identical
+fixtures (§5). The only number still marked **to be run** is the in-browser
+keystroke-to-paint (INP) comparison against a live editor *view* — that needs a
+browser and is specified in [`bench/keystroke.md`](../bench/keystroke.md).
 
 ## How to reproduce
 
@@ -161,35 +162,90 @@ the e2e phase**, not part of this parse/size harness — this section documents 
 a11y surface that pass will assert against, so the claim isn't mistaken for a
 completed audit.
 
-## 5. The CodeMirror-6 baseline — to be run
+## 5. The CodeMirror-6 baseline — measured
 
-SPEC §10 requires a **named competitor** on the **same workloads**. The harness
-exists (`bench/cm6-baseline.bench.ts`) and compares Typewright's `parse()` against
-`@lezer/markdown` — the parser CodeMirror 6's markdown mode is built on — on the
-identical fixtures. It stays **inert** (registers a skipped placeholder) until the
-baseline dependency is installed, so `pnpm bench` never breaks in a clean
-checkout.
+SPEC §10 requires a **named competitor** on the **same workloads**. This is that
+comparison, run for real (`bench/cm6-baseline.bench.ts`).
 
-It is deliberately **not run in this pass** to avoid mutating the worktree's
-shared `node_modules`. To populate the baseline column locally:
+**Competitor & version.** CodeMirror 6's Markdown mode —
+`codemirror 6.0.2` · `@codemirror/lang-markdown 6.5.0` · `@codemirror/state 6.7.1`
+(the Lezer-based markdown parser CodeMirror-6 editors actually run). These are
+**bench-only devDependencies — never shipped** (see the `//bench` note in
+`package.json`); the bench skips cleanly if they are absent, so `pnpm bench` stays
+green in a clean checkout.
 
-```sh
-pnpm add -D @lezer/markdown @lezer/common     # parse baseline (node, no DOM)
-pnpm bench                                     # fills the Typewright-vs-Lezer table
-```
+**Workload.** The exact same deterministic fixtures as §1 (5.2 / 50.5 / 1024.5 KB
+mixed content), with CodeMirror configured on its **GFM base**
+(`markdown({ base: markdownLanguage })`) so its coverage matches Typewright's GFM
+(tables, task lists, `~~strikethrough~~`, autolinks) — apples to apples.
 
-For the **full in-browser keystroke-to-paint** comparison against a real editor
-*view* (not just its parser), install `codemirror @codemirror/lang-markdown` and
-drive both editors with the identical Playwright method documented in
-[`bench/keystroke.md`](../bench/keystroke.md). All baseline dependencies are
-**devDependencies of the bench only — never shipped**.
+**Method.** Both sides are timed as sibling `bench` cases in the *same* tinybench
+run, on the same machine, under the same GC behaviour:
 
-Until that runs, no comparative speed claim is published here. What *is* published
-above stands on its own: reproducible Typewright numbers on named, deterministic
-workloads, with the misses called out.
+- **Typewright** — `parse(src)` → offset-exact **block+inline AST**.
+- **CodeMirror-6** — the document is built with `EditorState.create({ doc, … })`
+  (the real editor document path), then the configured markdown language's Lezer
+  parser is driven to completion with `parser.parse(src)`, producing a **full
+  Lezer syntax tree** that covers the whole document (`tree.length === src.length`
+  — verified and logged per fixture; no viewport laziness, no timeout that could
+  abort on the 1 MB doc). `EditorState.create` (document construction, ~2–10 ms) is
+  excluded from the parse column so the comparison is parse-vs-parse.
+
+**What each measures — the honest caveat.** These are *different artefacts*, not
+"same output, different speed". Typewright emits a compact block AST tuned for
+decoration + dirty-block reparse (~6.1 K top-level blocks at 1 MB). CodeMirror
+emits a full Lezer tree — every node and every marker (~356 / ~3.3 K / ~67 K
+nodes for the three fixtures) — that also backs its incremental reparse and
+highlighting. So this compares two Markdown front-ends' **cold-parse cost on
+identical bytes**, each building the tree its own pipeline needs.
+
+### Cold parse — Typewright `parse()` vs CodeMirror-6 `parser.parse()`
+
+As in §1, both allocate a whole tree per call, so `mean`/`p75` fold in periodic
+**GC pauses** (CodeMirror's are heavier — its 1 MB `p999` reached ~3.4 s in one
+run). The **GC-free `min` is the stable, reproducible floor** and the headline;
+the figures below are `min` floors, and each range is that floor's spread across
+three runs.
+
+| Workload | Typewright `parse()` **min** | CodeMirror-6 **min** | Typewright is |
+|---|---|---|---|
+| 5.2 KB | **~0.25 ms** | ~1.0 – 1.1 ms | **~4× faster** |
+| 50.5 KB | **~2.5 – 2.6 ms** | ~11.6 – 20.6 ms | **~4.5 – 8× faster** |
+| 1024.5 KB | **~75 – 79 ms** | ~294 – 417 ms | **~3.8 – 5.3× faster** |
+
+Across the *whole* distribution (tinybench's throughput/`mean` summary, GC tails
+included) the ratio is noisier still: over three runs Typewright's summarised
+speed-up was ~5–8× at 50 KB and ~4–11× at 1 MB, while at 5 KB one GC-heavy run
+even flipped the *mean* to a statistical tie (CodeMirror ~1.01×) — even though that
+same run's `min` floor kept Typewright ~4× ahead (0.26 ms vs 1.09 ms). That flip is
+exactly why the GC-free `min` floors above are the honest, less-noisy signal and
+the mean is not.
+
+**Read this plainly.** On these cold-parse workloads Typewright is consistently
+faster — by roughly **4–8× at the GC-free floor** (about **4×** at 5 KB, widening
+on the larger docs). That is expected and not a
+magic constant: Typewright builds a lean block AST specialised for GFM+MDX, while
+Lezer builds a complete, general syntax tree with more nodes and machinery. It is
+**not** a claim that Typewright's editor is 4–5× faster end to end — CodeMirror is
+a mature, incremental, viewport-lazy editor, and the interactive win (if any) is
+decided by keystroke-to-paint on a live view, which is the still-pending INP
+measurement below, **not** by this batch cold-parse number. SPEC §10 is explicit
+that batch parse throughput is *not* the headline metric; this baseline is
+published because a named competitor on named workloads is the honesty bar, and
+the result happens to favour Typewright here.
+
+### Still to run — in-browser keystroke-to-paint (INP)
+
+The number that actually matters (SPEC §10) is **keystroke → paint** on a live
+editor *view*, not batch parse. That needs a browser to measure layout + paint and
+so is not part of this node harness. `codemirror` + `@codemirror/lang-markdown`
+(the full editor, also already dev-installed) are driven with the identical
+Playwright method in [`bench/keystroke.md`](../bench/keystroke.md) — **to be run**.
+No end-to-end interactive speed claim vs CodeMirror is published until it is.
 
 ---
 
 *Files: `bench/fixtures/gen.ts` (generator) · `bench/cold-parse.bench.ts` (parse)
-· `bench/keystroke.md` (INP method) · `bench/cm6-baseline.bench.ts` (competitor,
-to be run) · `bench/size.ts` (budget). Scripts: `pnpm bench`, `pnpm size`.*
+· `bench/keystroke.md` (INP method, to be run) · `bench/cm6-baseline.bench.ts`
+(CodeMirror-6 cold-parse baseline) · `bench/size.ts` (budget). Scripts:
+`pnpm bench`, `pnpm size`.*

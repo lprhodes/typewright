@@ -219,6 +219,17 @@ function assertEquivalent(ec: EditCase, options: ParseOptions | undefined, ctx: 
     expect(stats.reusedBlocks).toBeGreaterThan(0);
     expect(stats.reparsedFromLine).toBeGreaterThan(0);
     expect(stats.reparsedFromLine).toBeLessThan(stats.totalLines);
+    // Right-bound instrumentation stays internally consistent: the reparsed region
+    // is a non-empty span no wider than the document…
+    expect(stats.reparsedToLine).toBeGreaterThan(stats.reparsedFromLine);
+    expect(stats.reparsedToLine).toBeLessThanOrEqual(stats.totalLines);
+    // …and whenever the suffix was reused, the reparse was genuinely bounded away
+    // from end-of-document (the tightening this suite exists to protect).
+    if (stats.reusedSuffixBlocks > 0) {
+      expect(stats.reparsedToLine).toBeLessThan(stats.totalLines);
+    } else {
+      expect(stats.reparsedToLine).toBe(stats.totalLines);
+    }
   }
   return !stats.fellBack;
 }
@@ -329,5 +340,107 @@ describe('parseIncremental — reuses the unchanged prefix', () => {
     const prev = parse(src);
     const ec = makeChange(src, 3, 3, '');
     expect(parseIncremental(prev, src, ec.change, ec.nextSrc)).toEqual(parse(src));
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Dirty-block tightening: a small edit near the TOP of a large document must
+ * reparse only a BOUNDED region (the dirty block(s) + a safe look-around) and
+ * reuse the unchanged suffix blocks re-offset by the edit delta — NOT reparse
+ * the whole tail. These assert (a) still deep-equal to a full parse, and (b) via
+ * the new stats that the tightening actually fired and the reparse stayed near
+ * the top. Fence edits, which open a cross-boundary construct, must decline the
+ * suffix reuse and fall back — still correct.
+ * ------------------------------------------------------------------ */
+
+/** 40 heading/paragraph pairs — a large multi-block doc with reusable suffix depth. */
+function bigDoc(): string {
+  const parts: string[] = [];
+  for (let n = 0; n < 40; n++) parts.push(`# Section ${n}\n\nBody paragraph number ${n} here.\n`);
+  return parts.join('\n');
+}
+
+describe('parseIncremental — bounds the reparse for a top-of-doc edit', () => {
+  it('a within-paragraph edit at the TOP reparses a bounded region and reuses the suffix', () => {
+    const src = bigDoc();
+    const prev = parse(src);
+
+    // Edit lands in the FIRST body paragraph — the whole tail is unchanged.
+    const at = src.indexOf('Body paragraph number 0 here.') + 'Body paragraph number 0'.length;
+    const ec = makeChange(src, at, at, ' EDITED');
+
+    const { doc, stats } = parseIncrementalWithStats(prev, src, ec.change, ec.nextSrc);
+
+    // (a) Correctness: identical to a full parse.
+    expect(doc).toEqual(parse(ec.nextSrc));
+    expect(stats.fellBack).toBe(false);
+
+    // (b) The tightening fired: the suffix was reused, and the reparsed region is
+    // a tiny span near the TOP — it does NOT extend to the last block.
+    expect(stats.reusedSuffixBlocks).toBeGreaterThan(0);
+    expect(stats.reparsedToLine).toBeLessThan(stats.totalLines);
+    // Reparsed only a couple of lines right at the top, far from end-of-document.
+    expect(stats.reparsedToLine).toBeLessThanOrEqual(8);
+    expect(stats.reparsedToLine - stats.reparsedFromLine).toBeLessThanOrEqual(4);
+    // Almost every block was reused (both the prefix and the shifted suffix).
+    expect(stats.reusedBlocks + stats.reusedSuffixBlocks).toBeGreaterThanOrEqual(
+      prev.children.length - 2,
+    );
+  });
+
+  it('a deletion at the TOP (negative delta) still bounds and re-offsets correctly', () => {
+    const src = bigDoc();
+    const prev = parse(src);
+
+    const base = src.indexOf('Body paragraph number 0 here.') + 'Body paragraph number 0'.length;
+    const ec = makeChange(src, base, base + ' here'.length, ''); // delete " here"
+
+    const { doc, stats } = parseIncrementalWithStats(prev, src, ec.change, ec.nextSrc);
+
+    expect(doc).toEqual(parse(ec.nextSrc));
+    expect(stats.fellBack).toBe(false);
+    expect(stats.reusedSuffixBlocks).toBeGreaterThan(0);
+    expect(stats.reparsedToLine).toBeLessThanOrEqual(8);
+  });
+
+  it('a fence opened at the TOP declines suffix reuse but stays correct', () => {
+    const src = bigDoc();
+    const prev = parse(src);
+
+    // Opening a fence is a cross-boundary construct: it would swallow the tail, so
+    // the join boundary cannot be proven and suffix reuse must be declined.
+    const at = src.indexOf('Body paragraph number 0 here.');
+    const ec = makeChange(src, at, at, '```\n');
+
+    const { doc, stats } = parseIncrementalWithStats(prev, src, ec.change, ec.nextSrc);
+
+    expect(doc).toEqual(parse(ec.nextSrc));
+    // Prefix reuse still applies (not a full fall-back), but the suffix tightening
+    // correctly stood down and the reparse ran to end-of-document.
+    expect(stats.reusedSuffixBlocks).toBe(0);
+    expect(stats.reparsedToLine).toBe(stats.totalLines);
+  });
+
+  it('a stream of keystrokes at the TOP stays deep-equal at every step', () => {
+    let src = bigDoc();
+    let prev = parse(src);
+    const rnd = mulberry32(0xfeed_face);
+    let boundedHits = 0;
+
+    for (let step = 0; step < 20; step++) {
+      // Type at the start of the first body paragraph (block 1) each step — a
+      // stable anchor that keeps the leading heading reusable as the prefix.
+      const at = src.indexOf('\n\n') + 2;
+      const insert = FRAGMENTS[Math.floor(rnd() * FRAGMENTS.length)]!;
+      const ec = makeChange(src, at, at, insert);
+      const { doc, stats } = parseIncrementalWithStats(prev, src, ec.change, ec.nextSrc);
+      expect(doc, `step ${step} ${ec.label}`).toEqual(parse(ec.nextSrc));
+      if (!stats.fellBack && stats.reusedSuffixBlocks > 0) boundedHits++;
+      src = ec.nextSrc;
+      prev = doc;
+    }
+
+    // The tightening fired for a healthy share of the top-of-doc keystrokes.
+    expect(boundedHits).toBeGreaterThan(5);
   });
 });

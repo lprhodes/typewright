@@ -78,12 +78,12 @@
     "size": "tsup && node --experimental-strip-types bench/size.ts",
     "prepublishOnly": "pnpm run build"
   },
-  "//bench": "The CodeMirror-6 / Lezer baseline column in docs/BENCHMARKS.md is opt-in and NEVER shipped. To populate it locally: `pnpm add -D @lezer/markdown @lezer/common` (pure-parse baseline, node) and/or `pnpm add -D codemirror @codemirror/lang-markdown` (in-browser keystroke-to-paint, see bench/keystroke.md). Keep these in devDependencies only. `pnpm bench` runs without them (the baseline stub skips).",
+  "//bench": "The CodeMirror-6 baseline in docs/BENCHMARKS.md is bench-only and NEVER shipped. bench/cm6-baseline.bench.ts runs a real cold-parse comparison (Typewright parse() vs @codemirror/lang-markdown's Lezer parser) from the devDependencies `codemirror`, `@codemirror/lang-markdown`, `@codemirror/state`, `@codemirror/view`. Keep them in devDependencies only — never dependencies/peerDependencies. The bench guards its import in try/catch: if a contributor prunes those devDeps, it registers a skipped placeholder so `pnpm bench` stays green. The full in-browser keystroke-to-paint (INP) comparison against the live CodeMirror view is separate and uses the same devDeps via the Playwright method in bench/keystroke.md.",
   "peerDependencies": {
-    "react": ">=18",
-    "react-dom": ">=18",
+    "@swc/wasm-web": "*",
     "esbuild-wasm": "*",
-    "@swc/wasm-web": "*"
+    "react": ">=18",
+    "react-dom": ">=18"
   },
   "peerDependenciesMeta": {
     "react": {
@@ -100,10 +100,15 @@
     }
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
+    "@codemirror/lang-markdown": "^6.5.0",
+    "@codemirror/state": "^6.7.1",
+    "@codemirror/view": "^6.43.6",
     "@playwright/test": "^1.49.1",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.4",
+    "codemirror": "^6.0.2",
     "jsdom": "^29.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
