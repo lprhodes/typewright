@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { applyCommand } from './commands';
-import type { Sel } from './commands';
+import { applyCommand, COMMANDS } from './commands';
+import type { Command, Sel } from './commands';
 
 const sel = (from: number, to: number): Sel => ({ from, to });
 
@@ -49,6 +49,24 @@ describe('applyCommand', () => {
   it('toggles a heading off when already at that level', () => {
     const r = applyCommand('## Title', sel(4, 4), 'heading2');
     expect(r.text).toBe('Title');
+  });
+
+  it('sets heading levels 4, 5 and 6 with the right prefix', () => {
+    expect(applyCommand('Title', sel(0, 0), 'heading4').text).toBe('#### Title');
+    expect(applyCommand('Title', sel(0, 0), 'heading5').text).toBe('##### Title');
+    expect(applyCommand('Title', sel(0, 0), 'heading6').text).toBe('###### Title');
+  });
+
+  it('re-levels an existing heading up to level 6', () => {
+    expect(applyCommand('# Title', sel(3, 3), 'heading4').text).toBe('#### Title');
+    expect(applyCommand('## Title', sel(4, 4), 'heading5').text).toBe('##### Title');
+    expect(applyCommand('### Title', sel(5, 5), 'heading6').text).toBe('###### Title');
+  });
+
+  it('toggles heading 4, 5 and 6 off when reapplied at the same level', () => {
+    expect(applyCommand('#### Title', sel(6, 6), 'heading4').text).toBe('Title');
+    expect(applyCommand('##### Title', sel(7, 7), 'heading5').text).toBe('Title');
+    expect(applyCommand('###### Title', sel(8, 8), 'heading6').text).toBe('Title');
   });
 
   it('makes a bullet list across multiple selected lines', () => {
@@ -101,6 +119,80 @@ describe('applyCommand', () => {
       expect(r.selection.from).toBeGreaterThanOrEqual(0);
       expect(r.selection.to).toBeLessThanOrEqual(r.text.length);
       expect(Number.isNaN(r.selection.from)).toBe(false);
+    }
+  });
+});
+
+describe('COMMANDS registry', () => {
+  // The complete set of command ids. Typed as Command[] so any id removed from
+  // the union breaks compilation here, keeping this list honest against the type.
+  const ALL_IDS: Command[] = [
+    'bold',
+    'italic',
+    'strikethrough',
+    'inlineCode',
+    'link',
+    'heading1',
+    'heading2',
+    'heading3',
+    'heading4',
+    'heading5',
+    'heading6',
+    'bulletList',
+    'orderedList',
+    'taskList',
+    'quote',
+    'horizontalRule',
+    'codeBlock',
+    'table',
+  ];
+
+  it('has exactly one entry per command id — none missing, none duplicated', () => {
+    const ids = COMMANDS.map((c) => c.id);
+    expect(ids.length).toBe(ALL_IDS.length);
+    expect(new Set(ids).size).toBe(ids.length); // no duplicates
+    expect([...ids].sort()).toEqual([...ALL_IDS].sort());
+  });
+
+  it('groups each command as inline, block or insert per the toolbar intent', () => {
+    const groupOf = (id: Command) => COMMANDS.find((c) => c.id === id)!.group;
+    for (const id of ['bold', 'italic', 'strikethrough', 'inlineCode', 'link'] as const) {
+      expect(groupOf(id)).toBe('inline');
+    }
+    for (const id of [
+      'heading1',
+      'heading2',
+      'heading3',
+      'heading4',
+      'heading5',
+      'heading6',
+      'bulletList',
+      'orderedList',
+      'taskList',
+      'quote',
+    ] as const) {
+      expect(groupOf(id)).toBe('block');
+    }
+    for (const id of ['horizontalRule', 'codeBlock', 'table'] as const) {
+      expect(groupOf(id)).toBe('insert');
+    }
+  });
+
+  it('exposes shortcuts only where one exists', () => {
+    const kbdOf = (id: Command) => COMMANDS.find((c) => c.id === id)!.kbd;
+    expect(kbdOf('bold')).toBe('⌘B');
+    expect(kbdOf('italic')).toBe('⌘I');
+    expect(kbdOf('link')).toBe('⌘K');
+    expect(kbdOf('inlineCode')).toBe('⌘E');
+    expect(kbdOf('strikethrough')).toBeUndefined();
+    expect(kbdOf('heading1')).toBeUndefined();
+    expect(kbdOf('table')).toBeUndefined();
+  });
+
+  it('gives every command a non-empty label', () => {
+    for (const c of COMMANDS) {
+      expect(typeof c.label).toBe('string');
+      expect(c.label.length).toBeGreaterThan(0);
     }
   });
 });

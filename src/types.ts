@@ -154,6 +154,83 @@ export interface DocChange {
 }
 
 /* ------------------------------------------------------------------ *
+ * Collaboration — comments & presence
+ * ------------------------------------------------------------------ *
+ * Controlled, data-in/events-out surfaces (mirror the `value`/`onChange`
+ * idiom): the host owns the data and the library stores nothing. Comment
+ * anchors are document offset ranges that survive edits via position mapping.
+ */
+
+/** A single reply within a comment thread. */
+export interface CommentReply {
+  id: string;
+  author: string;
+  body: string;
+  /** ISO-8601 timestamp; host-supplied. */
+  createdAt?: string;
+}
+
+/** A comment thread anchored to a document range. */
+export interface CommentThread {
+  id: string;
+  /** Document offset range the thread is attached to. */
+  anchor: { from: number; to: number };
+  /** Snapshot of the anchored text at creation time. */
+  quote?: string;
+  author: string;
+  body: string;
+  /** ISO-8601 timestamp; host-supplied. */
+  createdAt?: string;
+  resolved?: boolean;
+  /** Emoji → list of user ids that reacted with it. */
+  reactions?: Record<string, string[]>;
+  replies: CommentReply[];
+}
+
+/** Comments configuration: threads in, edit intents out. */
+export interface CommentsOptions {
+  enabled?: boolean;
+  /** All threads to render; the host is the source of truth. */
+  threads: CommentThread[];
+  /** The current user, used to author new threads/replies/reactions. */
+  me?: { id: string; name: string };
+  /** Fired when the user creates a thread from a selection. */
+  onCreate?: (t: { anchor: { from: number; to: number }; quote: string; body: string }) => void;
+  onReply?: (threadId: string, body: string) => void;
+  onReact?: (threadId: string, emoji: string) => void;
+  onResolve?: (threadId: string, resolved: boolean) => void;
+  onDelete?: (threadId: string) => void;
+}
+
+/** A remote collaborator whose cursor/selection is rendered live. */
+export interface PresencePeer {
+  id: string;
+  name: string;
+  /** Cursor/selection colour (any CSS colour). */
+  color?: string;
+  /** Current selection as a document offset range; caret if `from === to`. */
+  cursor?: { from: number; to: number };
+}
+
+/* ------------------------------------------------------------------ *
+ * Settings / command palette
+ * ------------------------------------------------------------------ */
+
+/** A host-extensible entry surfaced in the command palette. */
+export interface SettingsCommand {
+  id: string;
+  label: string;
+  run: () => void;
+}
+
+/** Settings panel + ⌘K command palette configuration. */
+export interface SettingsOptions {
+  enabled?: boolean;
+  /** Extra palette entries appended to the built-in commands. */
+  commands?: SettingsCommand[];
+}
+
+/* ------------------------------------------------------------------ *
  * Editor configuration + events
  * ------------------------------------------------------------------ */
 
@@ -173,6 +250,18 @@ export interface EditorConfig {
   toolbar?: boolean | 'docked' | 'floating';
   /** Lines rendered outside the viewport bounds (virtualization overscan). */
   overscan?: number;
+  /**
+   * Inline comments & threads. `true` enables the surface with no threads;
+   * pass {@link CommentsOptions} to supply threads and edit callbacks.
+   */
+  comments?: boolean | CommentsOptions;
+  /** Remote collaborators whose cursors/selections render live (data-in). */
+  presence?: PresencePeer[];
+  /**
+   * Settings panel + ⌘K command palette. `true` enables the built-ins;
+   * pass {@link SettingsOptions} to append host commands.
+   */
+  settings?: boolean | SettingsOptions;
 }
 
 export interface EditorEvents {

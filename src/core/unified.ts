@@ -22,7 +22,8 @@ export interface Marker extends Pos {
  *
  * Covers: heading `#… ` prefixes, the two emphasis/strong/strike delimiter runs
  * on each side, inline-code backtick fences, link `[`/`](`/url/`)` pieces, the
- * image `!` (plus its bracket/paren pieces), and list-item markers.
+ * image `!` (plus its bracket/paren pieces), list-item markers, inline-math `$`
+ * (or `$$`) delimiters, and footnote-reference `[^`/`]` brackets.
  */
 export function collectMarkers(doc: Document): Marker[] {
   const markers: Marker[] = [];
@@ -84,6 +85,23 @@ export function collectMarkers(doc: Document): Marker[] {
       case 'listItem': {
         // The list marker up to the start of item content (`- `, `1. `, `- [x] `).
         push(node.from, node.contentFrom, 'listMarker');
+        break;
+      }
+      case 'math': {
+        // The `$` (inline) / `$$` (display) fences on each side of the source.
+        const delim = node.display ? 2 : 1;
+        const openTo = Math.min(node.from + delim, node.to);
+        const closeFrom = Math.max(node.to - delim, openTo);
+        push(node.from, openTo, 'math'); // opening `$`/`$$`
+        push(closeFrom, node.to, 'math'); // closing `$`/`$$`
+        break;
+      }
+      case 'footnoteRef': {
+        // `[^` opener and `]` closer; the id between them stays as content.
+        const openTo = Math.min(node.from + 2, node.to);
+        const closeFrom = Math.max(node.to - 1, openTo);
+        push(node.from, openTo, 'footnoteRef'); // `[^`
+        push(closeFrom, node.to, 'footnoteRef'); // `]`
         break;
       }
     }

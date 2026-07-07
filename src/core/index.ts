@@ -19,14 +19,28 @@ export * from '../types';
 /* Headless engine surface — parser, renderer, unified-mode, folding, doc model. */
 export { parse } from './parser';
 export { renderToHtml, renderInline, renderNode, safeUrl } from './render';
+export type { RenderOptions } from './render';
 export { collectMarkers, hiddenMarkers, activeBlockIndex } from './unified';
 export type { Marker } from './unified';
 export { headingFoldRanges } from './fold';
 export type { FoldRange } from './fold';
-export { applyCommand } from './commands';
+export { applyCommand, COMMANDS } from './commands';
 export type { Command, Sel, CommandResult } from './commands';
 export { TextDoc } from './text';
 export type { Change, LineInfo, Position } from './text';
+/* Syntax highlighting (native, zero-dep), comment-anchor + table helpers. */
+export { highlightToHtml } from './highlight';
+export { mapAnchor } from './comments';
+export {
+  cellSourceRange,
+  addRow,
+  addColumn,
+  removeRow,
+  removeColumn,
+  setAlignment,
+} from './table';
+export type { TableEdit } from './table';
+/* ParseOptions and the AST node types are re-exported here too. */
 export * from './ast';
 
 export interface EditorViewOptions extends EditorConfig, EditorEvents {

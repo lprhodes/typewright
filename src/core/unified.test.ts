@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { parse } from './parser';
 import { collectMarkers, hiddenMarkers, activeBlockIndex } from './unified';
 import type { Marker } from './unified';
+import type { Document } from './ast';
 
 const kinds = (markers: Marker[]): string[] => markers.map((m) => m.kind);
 const ofKind = (markers: Marker[], kind: string): Marker[] =>
@@ -100,6 +101,105 @@ describe('collectMarkers', () => {
     expect(() => collectMarkers(parse('[broken](  '))).not.toThrow();
     expect(() => collectMarkers(parse(''))).not.toThrow();
     expect(() => collectMarkers(parse('###'))).not.toThrow();
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Math + footnote-ref markers (Wave 2b). Built from direct AST fixtures so the
+ * offsets are exact and independent of the parser's opt-in extension flags.
+ * ------------------------------------------------------------------ */
+
+describe('collectMarkers — math + footnote refs', () => {
+  it('emits two `$` delimiter markers around inline math', () => {
+    // `$e=mc^2$` — [0,8): '$' at [0,1), source [1,7), '$' at [7,8).
+    const doc: Document = {
+      type: 'document',
+      from: 0,
+      to: 8,
+      children: [
+        {
+          type: 'paragraph',
+          from: 0,
+          to: 8,
+          children: [{ type: 'math', from: 0, to: 8, value: 'e=mc^2', display: false }],
+        },
+      ],
+    };
+    const math = ofKind(collectMarkers(doc), 'math');
+    expect(math).toHaveLength(2);
+    expect(math[0]!.from).toBe(0);
+    expect(math[0]!.to).toBe(1);
+    expect(math[1]!.from).toBe(7);
+    expect(math[1]!.to).toBe(8);
+  });
+
+  it('emits two `$$` delimiter markers around display math', () => {
+    // `$$x$$` — [0,5): '$$' at [0,2), source [2,3), '$$' at [3,5).
+    const doc: Document = {
+      type: 'document',
+      from: 0,
+      to: 5,
+      children: [
+        {
+          type: 'paragraph',
+          from: 0,
+          to: 5,
+          children: [{ type: 'math', from: 0, to: 5, value: 'x', display: true }],
+        },
+      ],
+    };
+    const math = ofKind(collectMarkers(doc), 'math');
+    expect(math).toHaveLength(2);
+    expect(math[0]!.from).toBe(0);
+    expect(math[0]!.to).toBe(2);
+    expect(math[1]!.from).toBe(3);
+    expect(math[1]!.to).toBe(5);
+  });
+
+  it('emits `[^` and `]` markers for a footnote reference', () => {
+    // `[^1]` — [0,4): '[^' at [0,2), id '1' at [2,3), ']' at [3,4).
+    const doc: Document = {
+      type: 'document',
+      from: 0,
+      to: 4,
+      children: [
+        {
+          type: 'paragraph',
+          from: 0,
+          to: 4,
+          children: [{ type: 'footnoteRef', from: 0, to: 4, id: '1' }],
+        },
+      ],
+    };
+    const fn = ofKind(collectMarkers(doc), 'footnoteRef');
+    expect(fn).toHaveLength(2);
+    expect(fn[0]!.from).toBe(0);
+    expect(fn[0]!.to).toBe(2);
+    expect(fn[1]!.from).toBe(3);
+    expect(fn[1]!.to).toBe(4);
+  });
+
+  it('reveals only the math delimiter the caret sits on', () => {
+    const doc: Document = {
+      type: 'document',
+      from: 0,
+      to: 8,
+      children: [
+        {
+          type: 'paragraph',
+          from: 0,
+          to: 8,
+          children: [{ type: 'math', from: 0, to: 8, value: 'e=mc^2', display: false }],
+        },
+      ],
+    };
+    const math = ofKind(collectMarkers(doc), 'math');
+    const open = math[0]!; // [0,1)
+    const close = math[1]!; // [7,8)
+    // caret on the opening '$' reveals it; the far closing '$' stays hidden
+    const hidden = hiddenMarkers(doc, { from: 0, to: 0 });
+    expect(hidden).not.toContainEqual(open);
+    expect(hidden).toContainEqual(close);
   });
 });
 
