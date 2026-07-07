@@ -1,7 +1,7 @@
 # TW-0003: Close remaining v0.2 deferred items (caret reveal, CM6 bench, a11y, reparse)
 
 **ID:** TW-0003
-**Status:** In Progress
+**Status:** In Review
 **Created:** 2026-07-08
 **Last updated:** 2026-07-08
 **Depends on:** TW-0002 (`ai/tw-0002`, unmerged) — builds on that branch.
@@ -136,3 +136,51 @@ branch — one branch, one review.
 Implementation plan: `docs/plans/plan-TW-0003.md` (Plan size: Standard).
 
 <!-- Progress sections are appended below. -->
+
+## Progress — 2026-07-08
+
+**Implementation Complete (local branch — no PR)**
+
+**Summary:** All four remaining v0.2 deferred/partial items shipped on `ai/tw-0002`: an opt-in caret-level per-marker reveal (`unifiedReveal: 'caret'`) on a managed contentEditable, a real CodeMirror-6 benchmark baseline, an axe-core accessibility sweep, and incremental-reparse tightening. Default block-level editing is byte-identical (un-regressed). Two adversarial review passes ran; all confirmed findings fixed with tests. `docs/FEATURES.md`/`README` flipped to shipped with honest coverage-boundary notes.
+
+**Branch:** `ai/tw-0002` (local, rebased on `main`; not pushed; worktree: `.worktrees/TW-0002`) — the same branch as TW-0002 (this closes its roadmap; one branch, one review). 8 TW-0003 commits on top of TW-0002's.
+
+**Built by wave:**
+- W1 (parallel): `parseIncremental` bounded to the dirty region + suffix re-offset (`parser.ts`, property-oracle deep-equal preserved); real CM6 cold-parse baseline (`bench/cm6-baseline.bench.ts`, published in `BENCHMARKS.md`); `collectMarkers` fence/blockquote coverage (`unified.ts`); `EditorConfig.unifiedReveal` (`types.ts`, additive).
+- W2: `CaretRevealBlock.tsx` — the contentEditable per-marker reveal surface (uncontrolled-during-edit, 1:1 source↔DOM mapping, IME via composition events, click-settle debounce, no `dangerouslySetInnerHTML`, `safeUrl` links); gated integration in `TypewrightEditor.tsx` (default path unchanged); 16 pure-helper unit tests.
+- Phase 6: 8 caret-reveal e2e (real Chromium) + 9 axe sweeps; +2 a11y fixes (task-checkbox labels, nested-interactive block role).
+
+**Rebase:** clean onto `main` (docs-only divergence; no code conflicts).
+
+**Reachability (every new capability reaches its producer):**
+| Capability | Entry | Producer | Wired? |
+|---|---|---|---|
+| Caret-level reveal | `unifiedReveal:'caret'` | `CaretRevealBlock` → `hiddenMarkers` | ✅ |
+| CM6 baseline | `pnpm bench` | `bench/cm6-baseline.bench.ts` → `BENCHMARKS.md` | ✅ |
+| a11y sweep | `pnpm e2e` | `e2e/a11y.spec.ts` (axe) | ✅ |
+| Reparse tightening | every commit | `parseIncremental` dirty-region bound | ✅ |
+
+**Clause coverage:**
+| Clause | Satisfied at | Status |
+|---|---|---|
+| Caret reveal per-marker; click no-jump; round-trips; default unchanged | `CaretRevealBlock.tsx`, e2e `caret-reveal.spec.ts` | ✅ |
+| Basic IME commit (CDP) | `CaretRevealBlock` composition handlers, e2e | ✅ (deep-CJK/dead-key/soft-kbd tail = documented boundary) |
+| CM6 numbers published | `docs/BENCHMARKS.md` | ✅ (Typewright ~4–8× faster cold-parse; honest batch-not-INP caveat) |
+| axe no serious/critical | `e2e/a11y.spec.ts` | ✅ (contrast = host-theme scope) |
+| Reparse bounded + deep-equal | `parser.ts`, `parser.incremental.test.ts` | ✅ (instrumented; top-of-doc edit reparses ≤4 lines vs 160) |
+| Zero runtime deps; CM6/axe devDeps only | `package.json` (`dependencies` empty) | ✅ |
+| `types.ts` semver additive | `unifiedReveal` added only | ✅ |
+| Docs in step | `FEATURES.md`, `README.md` | ✅ |
+
+**Acceptance review:** 2 rounds. Round 1 (mapping + security/IME lenses + adversarial verify): 3 Medium + 2 Low confirmed (1 refuted earlier at the TW-0002 stage), all fixed — split double-render, comments-blind-to-caret-blocks, IME-blur, block-merge no-op, `<br>` newline. Round 2 (fix-verify + regression hunt): all 5 verified resolved, 0 non-Low new; 2 Lows the fixes themselves introduced (caret-clamp offset, `<br>` length-space) fixed. No Critical/High.
+
+**Implementation assumptions:** caret reveal is opt-in (block-level default, protects the working surface); IME handled via `contentEditable` rather than the SPEC §4.4 hidden-sink (documented architectural divergence — the user-facing goal is met); comment highlights are not *drawn* inline inside a focused caret block (thread still anchors correctly, shows in sidebar); CM6/axe are dev-only.
+
+**Known coverage boundaries (honest, not breakage):** deep CJK candidate-window / dead-key / soft-keyboard IME tail and Home/End line-nav in the caret surface are exercised as far as headless e2e reaches, not exhaustively (flagged for a real-browser check).
+
+**Gates (actually run):** typecheck ✅ · tsup build ✅ · unit 332 ✅ · Playwright e2e 58 ✅ (twice) · size budget ✅. (`parser.perf.test.ts` 2 wall-clock flakes are pre-existing, also fail on `main` under load — excluded.)
+
+### Status: ready for human review — NOT merged
+
+Per the ship-feature stop-before-merge configuration, `ai/tw-0002` (now carrying both TW-0002 and TW-0003) is **left local and unmerged**. No push.
+
