@@ -1,7 +1,7 @@
 # TW-0003: Close remaining v0.2 deferred items (caret reveal, CM6 bench, a11y, reparse)
 
 **ID:** TW-0003
-**Status:** In Review
+**Status:** Done (Merged 2026-07-07)
 **Created:** 2026-07-08
 **Last updated:** 2026-07-08
 **Depends on:** TW-0002 (`ai/tw-0002`, unmerged) — builds on that branch.

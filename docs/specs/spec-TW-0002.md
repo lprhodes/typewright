@@ -1,7 +1,7 @@
 # TW-0002: v0.2 gap-closure — deferred featureset to spec-complete
 
 **ID:** TW-0002
-**Status:** In Review
+**Status:** Done (Merged 2026-07-07)
 **Created:** 2026-07-07
 **Last updated:** 2026-07-08
 

@@ -1,7 +1,7 @@
 # TW-0004: Close TW-0003 audit gaps (benchmarks honesty + low fixes)
 
 **ID:** TW-0004
-**Status:** In Review
+**Status:** Done (Merged 2026-07-07)
 **Created:** 2026-07-07
 **Last updated:** 2026-07-07
 **Depends on:** TW-0003 (`ai/tw-0002`, unmerged) — builds on that branch.
