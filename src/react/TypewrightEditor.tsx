@@ -20,6 +20,7 @@ import type {
   SandboxOptions,
   SettingsOptions,
 } from '../types';
+import { CaretRevealBlock, CARET_REVEAL_CSS } from './CaretRevealBlock';
 import { CommentsSidebar, COMMENTS_CSS } from './CommentsSidebar';
 import { FoldMenu, FOLDMENU_CSS } from './FoldMenu';
 import { SandboxIsland, SANDBOX_ISLAND_CSS } from './SandboxIsland';
@@ -76,10 +77,10 @@ export function useInjectStyles(): void {
     el.id = STYLE_ID;
     // One injected sheet keyed by STYLE_ID carries the editor chrome plus the
     // widget-island styles (table grid + fold menu + comments sidebar +
-    // settings panel / command palette + sandbox islands), so consumers need no
-    // extra CSS.
+    // settings panel / command palette + sandbox islands + caret-reveal), so
+    // consumers need no extra CSS.
     el.textContent =
-      TYPEWRIGHT_CSS + TABLEGRID_CSS + FOLDMENU_CSS + COMMENTS_CSS + SETTINGS_CSS + SANDBOX_ISLAND_CSS;
+      TYPEWRIGHT_CSS + TABLEGRID_CSS + FOLDMENU_CSS + COMMENTS_CSS + SETTINGS_CSS + SANDBOX_ISLAND_CSS + CARET_REVEAL_CSS;
     document.head.appendChild(el);
   }, []);
 }
@@ -133,6 +134,16 @@ function isMdxIslandBlock(b: Block, ic: IslandCtx): boolean {
 /** A ```` ```mermaid ```` fence that should render as a live diagram island. */
 function isMermaidIslandBlock(b: Block, ic: IslandCtx): boolean {
   return ic.mermaidActive && b.type === 'codeBlock' && fenceLang(b.lang) === 'mermaid';
+}
+
+/**
+ * Which block types render as caret-level source reveal (SPEC §5.2). Only the
+ * plain text / formatting blocks are a good fit; a table stays a {@link TableGrid},
+ * an MDX/Mermaid block stays its island, and code/thematic-break/math/footnote/
+ * def-list blocks keep their existing renderer.
+ */
+function isCaretEligible(b: Block): boolean {
+  return b.type === 'heading' || b.type === 'paragraph' || b.type === 'list' || b.type === 'blockquote';
 }
 
 /** Build the island element for an island-eligible block (`code` is the block source). */
@@ -898,6 +909,7 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
       onSelectionChange,
       onModeChange,
       mode: modeProp = 'unified',
+      unifiedReveal = 'block',
       extensions,
       folding,
       keymap,
@@ -1258,7 +1270,11 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
       );
     }
 
-    // unified + preview: editable block-level rich preview
+    // unified + preview: editable block-level rich preview.
+    // Caret-level source reveal (SPEC §5.2) is opt-in and ONLY in `unified` mode
+    // when editable — every other case keeps today's block click-to-edit path
+    // byte-for-byte, so the default (`unifiedReveal: 'block'`) is unchanged.
+    const caretReveal = mode === 'unified' && unifiedReveal === 'caret' && !readOnly;
     return finish(
       <UnifiedEditor
         md={md}
@@ -1266,6 +1282,7 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
         rootClass={rootClass}
         style={style}
         readOnly={readOnly}
+        caretReveal={caretReveal}
         placeholder={placeholder}
         foldingEnabled={effFolding}
         showGutter={showGutter}
@@ -1400,6 +1417,8 @@ interface UnifiedProps {
   bindings: Map<string, Command>;
   /** Executable-island config (sandboxed MDX + Mermaid); inert when off. */
   islands: IslandCtx;
+  /** Render eligible blocks with caret-level source reveal (SPEC §5.2, opt-in). */
+  caretReveal?: boolean;
   /** Ref the collab layer walks for comment highlights + presence carets. */
   contentRef?: React.RefObject<HTMLDivElement | null>;
   /** Whether comments are active (enables selection-to-comment on blocks). */
@@ -1415,7 +1434,7 @@ interface UnifiedProps {
 }
 
 function UnifiedEditor(props: UnifiedProps): React.ReactElement {
-  const { md, mdRef, rootClass, style, readOnly, placeholder, foldingEnabled, showGutter, persistKey, commitValue, register, toolbar, parseOpts, renderOpts, bindings, islands, contentRef, commentsActive, onCommentSelect, overscan, lastCommitRef, onVisibleChange } = props;
+  const { md, mdRef, rootClass, style, readOnly, placeholder, foldingEnabled, showGutter, persistKey, commitValue, register, toolbar, parseOpts, renderOpts, bindings, islands, caretReveal, contentRef, commentsActive, onCommentSelect, overscan, lastCommitRef, onVisibleChange } = props;
   const [active, setActive] = React.useState<number | null>(null);
   const [draft, setDraft] = React.useState('');
   // Folds are stored by heading KEY (a stable slug), NOT block index, so a
@@ -1884,6 +1903,12 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
               // A table is edited in its grid, not via a click-to-reveal source
               // textarea; the grid emits already-scoped splices we apply verbatim.
               <TableGrid table={b} source={mdRef.current} onChange={handleTableChange} readOnly={readOnly} />
+            ) : caretReveal && isCaretEligible(b) ? (
+              // Caret-level reveal (SPEC §5.2): edited in place via a managed
+              // contentEditable that emits scoped splices — same commit path as
+              // the table grid (apply the splice + commit → anchors/folds/parse
+              // all keep working). Opt-in; never on the default block path.
+              <CaretRevealBlock block={b} source={mdRef.current} onChange={handleTableChange} readOnly={readOnly} />
             ) : (
               <div
                 className="tw-block"
