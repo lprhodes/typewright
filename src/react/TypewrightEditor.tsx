@@ -1301,8 +1301,11 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
 
     // unified + preview: editable block-level rich preview.
     // Caret-level source reveal (SPEC §5.2) is opt-in and ONLY in `unified` mode
-    // when editable — every other case keeps today's block click-to-edit path
-    // byte-for-byte, so the default (`unifiedReveal: 'block'`) is unchanged.
+    // when editable — every other case keeps today's block click-to-edit path.
+    // The default (`unifiedReveal: 'block'`) is behaviourally unchanged (asserted
+    // by the default-mode test in e2e/caret-reveal.spec.ts); note the block branch
+    // itself was still touched by this release's a11y fixes (labels + conditional
+    // role), so it is behaviourally — not byte-for-byte — identical to before.
     const caretReveal = mode === 'unified' && unifiedReveal === 'caret' && !readOnly;
     return finish(
       <UnifiedEditor

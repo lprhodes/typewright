@@ -7,7 +7,8 @@
  *
  *   1. `parse()`                 — cold full parse of the whole document.
  *   2. `parseIncremental()`      — the reparse a single keystroke triggers, at
- *                                  two edit positions (mid-doc and near-EOF).
+ *                                  three edit positions (near-top ~5%, mid-doc,
+ *                                  and near-EOF).
  *   3. `parse()` on the edited   — the full-reparse baseline for the same
  *      source (baseline)           keystroke, to quantify the incremental win.
  *
@@ -15,11 +16,16 @@
  * number — layout/paint happens in the browser and is measured separately (see
  * `bench/keystroke.md`). vitest prints the hz / mean / p99 table via tinybench.
  *
- * Honesty note (SPEC §10): `parseIncremental` reuses the block prefix *before*
- * the edit and reparses from there to end-of-document (correctness over a
- * fast-but-wrong shift pass — see parser.ts). So its cost scales with how much
- * document sits AFTER the caret: a near-EOF edit is cheap, a mid-doc edit
- * reparses ~half. Both positions are reported rather than cherry-picking.
+ * Honesty note (SPEC §10): `parseIncremental` reuses the block prefix before the
+ * edit AND, when a safe block boundary can be proven, bounds the reparse to the
+ * dirty block(s) and re-offsets the unchanged suffix (`tryReuseSuffix` in
+ * parser.ts) — so the reparsed *span* is O(edited block), not the whole tail.
+ * Two costs still scale with what sits AFTER the caret, and the @top row exposes
+ * them: (a) re-offsetting the reused suffix walks every trailing node, so a
+ * near-top edit's wall-clock still grows with document size; (b) an edit inside
+ * the very FIRST block has no reusable prefix and falls back to a full parse
+ * (see parser.incremental.test.ts). All three positions are reported rather than
+ * cherry-picking the cheap near-EOF case.
  */
 import { bench, describe } from 'vitest';
 import {
@@ -33,6 +39,8 @@ type Fixture = {
   name: string;
   src: string;
   doc: ReturnType<typeof parse>;
+  topChange: { from: number; to: number; insert: string };
+  topNext: string;
   midChange: { from: number; to: number; insert: string };
   midNext: string;
   endChange: { from: number; to: number; insert: string };
@@ -48,12 +56,17 @@ function editAt(src: string, at: number) {
 const fixtures: Fixture[] = Object.entries(WORKLOADS).map(([name, bytes]) => {
   const src = makeDoc(bytes);
   const doc = parse(src);
+  // ~5% in — past the first block, so the bounded fast path fires, but a large
+  // suffix must be re-offset. This is the honest "early-doc keystroke" cost.
+  const top = editAt(src, Math.floor(src.length * 0.05));
   const mid = editAt(src, Math.floor(src.length / 2));
   const end = editAt(src, Math.floor(src.length * 0.98));
   return {
     name,
     src,
     doc,
+    topChange: top.change,
+    topNext: top.next,
     midChange: mid.change,
     midNext: mid.next,
     endChange: end.change,
@@ -62,13 +75,17 @@ const fixtures: Fixture[] = Object.entries(WORKLOADS).map(([name, bytes]) => {
 });
 
 // One-shot correctness + reuse report (printed once at load, not on the hot path).
+function reuse(s: ReturnType<typeof parseIncrementalWithStats>['stats']): string {
+  return `reused=${s.reusedBlocks} reparse=${s.reparsedFromLine}→${s.reparsedToLine}/${s.totalLines} suffix=${s.reusedSuffixBlocks} fellBack=${s.fellBack}`;
+}
 for (const f of fixtures) {
+  const top = parseIncrementalWithStats(f.doc, f.src, f.topChange, f.topNext);
   const mid = parseIncrementalWithStats(f.doc, f.src, f.midChange, f.midNext);
   const end = parseIncrementalWithStats(f.doc, f.src, f.endChange, f.endNext);
   const kb = (f.src.length / 1024).toFixed(1);
   // eslint-disable-next-line no-console
   console.log(
-    `[incremental:${f.name} ${kb}KB] mid: reused=${mid.stats.reusedBlocks} reparseFrom=${mid.stats.reparsedFromLine}/${mid.stats.totalLines} fellBack=${mid.stats.fellBack} | end: reused=${end.stats.reusedBlocks} reparseFrom=${end.stats.reparsedFromLine}/${end.stats.totalLines} fellBack=${end.stats.fellBack}`,
+    `[incremental:${f.name} ${kb}KB]\n  top(5%): ${reuse(top.stats)}\n  mid:     ${reuse(mid.stats)}\n  end:     ${reuse(end.stats)}`,
   );
 }
 
@@ -88,6 +105,12 @@ for (const f of fixtures) {
   describe(`${f.name} — ${kb} KB mixed`, () => {
     bench('cold parse()', () => {
       parse(f.src);
+    }, o);
+    bench('keystroke @top — parseIncremental()', () => {
+      parseIncremental(f.doc, f.src, f.topChange, f.topNext);
+    }, o);
+    bench('keystroke @top — full parse() [baseline]', () => {
+      parse(f.topNext);
     }, o);
     bench('keystroke @mid — parseIncremental()', () => {
       parseIncremental(f.doc, f.src, f.midChange, f.midNext);

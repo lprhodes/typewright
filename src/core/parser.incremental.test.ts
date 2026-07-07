@@ -444,3 +444,76 @@ describe('parseIncremental — bounds the reparse for a top-of-doc edit', () => 
     expect(boundedHits).toBeGreaterThan(5);
   });
 });
+
+/** Collect every distinct object/array reference reachable from `root` into `into`. */
+function collectNodes(root: unknown, into: Set<unknown>): void {
+  if (root === null || typeof root !== 'object') return;
+  if (into.has(root)) return;
+  into.add(root);
+  if (Array.isArray(root)) {
+    for (const x of root) collectNodes(x, into);
+  } else {
+    for (const v of Object.values(root)) collectNodes(v, into);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Reuse boundaries + tree isolation. Two documented facts about the
+ * dirty-block tightening: (1) an edit inside the FIRST block declines the
+ * fast path (no reusable prefix to anchor on) and falls back to a full parse
+ * — a known boundary, not a bug; (2) the reused suffix is always CLONED, so a
+ * reparsed document never shares node identity with its predecessor, even for
+ * a same-length (delta 0) edit. Both are asserted against the real parser.
+ * ------------------------------------------------------------------ */
+describe('parseIncremental — reuse boundaries and tree isolation', () => {
+  it('an edit inside the FIRST block falls back to a full parse (documented boundary — see BENCHMARKS.md §2)', () => {
+    const src = bigDoc();
+    const prev = parse(src);
+
+    // Block 0 is the leading `# Section 0` heading. The reuse-cut loop needs a
+    // block BEFORE the edit to anchor prefix safety (`k >= 1`), so an edit inside
+    // block 0 has no reusable prefix and declines suffix reuse → full parse. This
+    // is the one large-doc case the tightening does not bound; documented so the
+    // published benchmarks stay honest (see BENCHMARKS.md §2 / FEATURES.md §10).
+    const at = src.indexOf('# Section 0') + '# Section'.length;
+    const ec = makeChange(src, at, at, ' X');
+
+    const { doc, stats } = parseIncrementalWithStats(prev, src, ec.change, ec.nextSrc);
+
+    expect(doc).toEqual(parse(ec.nextSrc)); // correctness holds regardless
+    expect(stats.fellBack).toBe(true);
+    expect(stats.reusedSuffixBlocks).toBe(0);
+    expect(stats.reparsedFromLine).toBe(0);
+    expect(stats.reparsedToLine).toBe(stats.totalLines);
+  });
+
+  it('reuses the suffix but CLONES it — no node shared with prev — even at delta 0', () => {
+    const src = bigDoc();
+    const prev = parse(src);
+
+    // Same-length replacement in the FIRST body paragraph (block 1): "Body" → "Xxxx".
+    // delta === 0, yet the whole unchanged tail is reused. Returning `prev`'s own
+    // block objects would alias subtrees between the two documents; a later in-place
+    // mutation of either tree would then corrupt the other. The reuse must clone.
+    const at = src.indexOf('Body paragraph number 0 here.');
+    const ec = makeChange(src, at, at + 4, 'Xxxx');
+    expect(ec.change.insert.length).toBe(ec.change.to - ec.change.from); // delta 0
+
+    const { doc, stats } = parseIncrementalWithStats(prev, src, ec.change, ec.nextSrc);
+
+    expect(doc).toEqual(parse(ec.nextSrc));
+    expect(stats.fellBack).toBe(false);
+    expect(stats.reusedSuffixBlocks).toBeGreaterThan(0);
+
+    // The trailing blocks come from the reused suffix. With delta 0 they carry the
+    // same offsets as in `prev`, so identity is the only thing that can differ:
+    // assert every node of the last few blocks is a distinct object from `prev`.
+    const prevNodes = new Set<unknown>();
+    collectNodes(prev, prevNodes);
+    for (const b of doc.children.slice(-5)) {
+      const tailNodes = new Set<unknown>();
+      collectNodes(b, tailNodes);
+      for (const n of tailNodes) expect(prevNodes.has(n)).toBe(false);
+    }
+  });
+});

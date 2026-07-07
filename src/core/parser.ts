@@ -1476,7 +1476,12 @@ function tryReuseSuffix(
     if (!proven) continue; // an open construct crossed the join — try the next candidate
 
     const rest = blocks.slice(j);
-    const shifted = delta === 0 ? rest : rest.map((b) => shiftBlock(b, delta));
+    // Always clone the reused suffix — even at `delta === 0`. Returning `prev`'s
+    // own block objects would alias subtrees between the old and new documents;
+    // `shiftBlock(b, 0)` is a pure structuredClone (no-op offset shift), so the
+    // returned tree never shares node identity with `prev`. (Insertions already
+    // pay this clone; a same-length edit is no different.)
+    const shifted = rest.map((b) => shiftBlock(b, delta));
     return { dirty, shifted, endLine: joinLine, count: rest.length };
   }
   return null;
