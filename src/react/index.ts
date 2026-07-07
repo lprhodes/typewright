@@ -6,5 +6,7 @@ export { TypewrightEditor, useInjectStyles } from './TypewrightEditor';
 export type { TypewrightEditorProps, TypewrightEditorHandle } from './TypewrightEditor';
 export { StreamingPreview } from './StreamingPreview';
 export type { StreamingPreviewProps } from './StreamingPreview';
+export { SandboxIsland } from './SandboxIsland';
+export type { SandboxIslandProps } from './SandboxIsland';
 
 export * from '../types';

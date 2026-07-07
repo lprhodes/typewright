@@ -4,6 +4,7 @@ import type { Block, Command, ParseOptions, RenderOptions } from '../core';
 import type {
   CommentsOptions,
   CommentThread,
+  ComponentMap,
   DocChange,
   EditorConfig,
   EditorEvents,
@@ -11,11 +12,17 @@ import type {
   Extensions,
   FoldingOptions,
   KeymapOptions,
+  MathOptions,
+  MdxOptions,
+  MdxTransform,
+  MermaidOptions,
   PresencePeer,
+  SandboxOptions,
   SettingsOptions,
 } from '../types';
 import { CommentsSidebar, COMMENTS_CSS } from './CommentsSidebar';
 import { FoldMenu, FOLDMENU_CSS } from './FoldMenu';
+import { SandboxIsland, SANDBOX_ISLAND_CSS } from './SandboxIsland';
 import { CommandPalette, SettingsPanel, SETTINGS_CSS } from './SettingsSurface';
 import type { PaletteCommand, SettingsState } from './SettingsSurface';
 import { TableGrid, TABLEGRID_CSS } from './TableGrid';
@@ -69,8 +76,10 @@ export function useInjectStyles(): void {
     el.id = STYLE_ID;
     // One injected sheet keyed by STYLE_ID carries the editor chrome plus the
     // widget-island styles (table grid + fold menu + comments sidebar +
-    // settings panel / command palette), so consumers need no extra CSS.
-    el.textContent = TYPEWRIGHT_CSS + TABLEGRID_CSS + FOLDMENU_CSS + COMMENTS_CSS + SETTINGS_CSS;
+    // settings panel / command palette + sandbox islands), so consumers need no
+    // extra CSS.
+    el.textContent =
+      TYPEWRIGHT_CSS + TABLEGRID_CSS + FOLDMENU_CSS + COMMENTS_CSS + SETTINGS_CSS + SANDBOX_ISLAND_CSS;
     document.head.appendChild(el);
   }, []);
 }
@@ -80,6 +89,72 @@ function extEnabled(x: boolean | { enabled?: boolean } | undefined, dflt = false
   if (x === undefined) return dflt;
   if (typeof x === 'boolean') return x;
   return x.enabled !== false;
+}
+
+/** Normalize an extension option (`boolean | Options`) to its options object, or null when off. */
+function extOptions<T extends { enabled?: boolean }>(x: boolean | T | undefined): T | null {
+  if (!extEnabled(x)) return null;
+  return typeof x === 'object' ? x : ({ enabled: true } as T);
+}
+
+/* ------------------------------------------------------------------ *
+ * Executable widget islands — sandboxed MDX + Mermaid (Phase D4 / E1)
+ * ------------------------------------------------------------------ *
+ * MDX (`mdxFlow`) blocks and `mermaid` fences render as an opaque-origin
+ * sandbox iframe (see {@link SandboxIsland}) — but ONLY when the host wires the
+ * config up: MDX needs a `transform`, Mermaid needs a resolved engine source.
+ * Without those, blocks fall back to the escaped-source / plain-fence rendering
+ * exactly as before, so default behaviour is unchanged.
+ */
+
+/** Everything the block renderers need to decide + build an island. */
+interface IslandCtx {
+  /** MDX execution is live (extension on AND a transform is configured). */
+  mdxActive: boolean;
+  mdxTransform?: MdxTransform;
+  mdxComponents?: ComponentMap;
+  mdxSandbox?: SandboxOptions;
+  /** Mermaid rendering is live (extension on AND the engine source resolved). */
+  mermaidActive: boolean;
+  mermaidEngine?: string;
+  theme: 'light' | 'dark';
+}
+
+/** The first whitespace-delimited token of a fence info string, lowercased. */
+function fenceLang(info: string): string {
+  return (info.trim().split(/\s+/)[0] ?? '').toLowerCase();
+}
+
+/** A `mdxFlow` HTML block that should render as a live MDX island. */
+function isMdxIslandBlock(b: Block, ic: IslandCtx): boolean {
+  return ic.mdxActive && b.type === 'htmlBlock' && b.variant === 'mdxFlow';
+}
+
+/** A ```` ```mermaid ```` fence that should render as a live diagram island. */
+function isMermaidIslandBlock(b: Block, ic: IslandCtx): boolean {
+  return ic.mermaidActive && b.type === 'codeBlock' && fenceLang(b.lang) === 'mermaid';
+}
+
+/** Build the island element for an island-eligible block (`code` is the block source). */
+function renderIsland(b: Block, ic: IslandCtx): React.ReactElement | null {
+  if (isMdxIslandBlock(b, ic)) {
+    const code = (b as Extract<Block, { type: 'htmlBlock' }>).value;
+    return (
+      <SandboxIsland
+        kind="mdx"
+        code={code}
+        transform={ic.mdxTransform}
+        components={ic.mdxComponents}
+        sandbox={ic.mdxSandbox}
+        theme={ic.theme}
+      />
+    );
+  }
+  if (isMermaidIslandBlock(b, ic)) {
+    const code = (b as Extract<Block, { type: 'codeBlock' }>).value;
+    return <SandboxIsland kind="mermaid" code={code} mermaidEngine={ic.mermaidEngine} theme={ic.theme} />;
+  }
+  return null;
 }
 
 /* ------------------------------------------------------------------ *
@@ -883,15 +958,52 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
     );
     const mathOn = extEnabled(effExtensions.math);
     const highlightOn = extEnabled(effExtensions.syntaxHighlight);
+    // Normalized extension options (null when the extension is off). MDX/Mermaid
+    // gate the executable islands; Math supplies the render hook below.
+    const mdxOpts = React.useMemo<MdxOptions | null>(() => extOptions<MdxOptions>(effExtensions.mdx), [effExtensions.mdx]);
+    const mermaidOpts = React.useMemo<MermaidOptions | null>(
+      () => extOptions<MermaidOptions>(effExtensions.mermaid),
+      [effExtensions.mermaid],
+    );
+    const mathOpts = React.useMemo<MathOptions | null>(() => extOptions<MathOptions>(effExtensions.math), [effExtensions.math]);
     const parseOpts = React.useMemo<ParseOptions>(
       () => ({ footnotes: true, defLists: true, math: mathOn }),
       [mathOn],
     );
+    // The host math renderer (trusted-as-sanitized per its MathOptions.render
+    // contract) replaces the escaped `tw-math-src` fallback when supplied (C-7).
     const renderOpts = React.useMemo<RenderOptions>(
-      () => ({ highlight: highlightOn ? highlightToHtml : undefined }),
-      [highlightOn],
+      () => ({ highlight: highlightOn ? highlightToHtml : undefined, math: mathOpts?.render }),
+      [highlightOn, mathOpts],
     );
     const keymapBindings = React.useMemo(() => buildKeymap(keymap), [keymap]);
+
+    // Mermaid's engine is host-supplied and async: resolve it once per config at
+    // the editor level and hold the source in state. Until it resolves, mermaid
+    // fences render as a plain code block (no island). MDX needs no async step —
+    // its transform is synchronous config.
+    const mdxIslandActive = !!mdxOpts && mdxOpts.transform !== undefined;
+    const [mermaidEngineSrc, setMermaidEngineSrc] = React.useState<string | undefined>(undefined);
+    React.useEffect(() => {
+      const getEngine = mermaidOpts?.getEngine;
+      if (!getEngine) {
+        setMermaidEngineSrc(undefined);
+        return undefined;
+      }
+      let canceled = false;
+      Promise.resolve()
+        .then(() => getEngine())
+        .then((src) => {
+          if (!canceled && typeof src === 'string') setMermaidEngineSrc(src);
+        })
+        .catch(() => {
+          if (!canceled) setMermaidEngineSrc(undefined);
+        });
+      return () => {
+        canceled = true;
+      };
+    }, [mermaidOpts]);
+    const mermaidIslandActive = !!mermaidOpts && !!mermaidOpts.getEngine && mermaidEngineSrc !== undefined;
 
     const isControlled = value !== undefined;
     const [internal, setInternal] = React.useState<string>(defaultValue ?? '');
@@ -937,6 +1049,22 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
     const effFolding = foldingOverride ?? foldingEnabled;
     const effAppearance = themeOverride ?? (theme?.appearance ?? 'auto');
     const effToolbar = toolbarOverride ?? toolbar;
+
+    // Everything the block renderers need to decide + build executable islands.
+    // Inert (both `*Active` false) unless the host wired MDX/Mermaid up, so the
+    // default block rendering is untouched.
+    const islands = React.useMemo<IslandCtx>(
+      () => ({
+        mdxActive: mdxIslandActive,
+        mdxTransform: mdxOpts?.transform,
+        mdxComponents: mdxOpts?.components,
+        mdxSandbox: mdxOpts?.sandbox,
+        mermaidActive: mermaidIslandActive,
+        mermaidEngine: mermaidEngineSrc,
+        theme: effAppearance === 'dark' ? 'dark' : 'light',
+      }),
+      [mdxIslandActive, mdxOpts, mermaidIslandActive, mermaidEngineSrc, effAppearance],
+    );
 
     const rootClass = ['tw-editor', `tw-mode-${mode}`, effAppearance !== 'auto' ? `tw-theme-${effAppearance}` : '', className]
       .filter(Boolean)
@@ -1037,16 +1165,52 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
     }
 
     if (mode === 'read') {
-      const html = renderToHtml(parse(md, parseOpts), renderOpts);
+      const readDoc = parse(md, parseOpts);
+      // Only interleave per-block when the doc actually contains a live island;
+      // otherwise the single sanitized-string path is kept byte-for-byte (so the
+      // default, islands-off read mode is unchanged and existing e2e stays green).
+      const hasIslands =
+        (islands.mdxActive || islands.mermaidActive) &&
+        readDoc.children.some((b) => isMdxIslandBlock(b, islands) || isMermaidIslandBlock(b, islands));
+      if (!hasIslands) {
+        const html = renderToHtml(readDoc, renderOpts);
+        return finish(
+          <div
+            className={rootClass}
+            style={style}
+            data-typewright="read"
+            ref={collab.active ? collab.contentRef : undefined}
+            // sanitized by render.ts
+            dangerouslySetInnerHTML={{ __html: html || `<p class="tw-placeholder">${escapeText(placeholder)}</p>` }}
+          />,
+        );
+      }
       return finish(
         <div
           className={rootClass}
           style={style}
           data-typewright="read"
           ref={collab.active ? collab.contentRef : undefined}
-          // sanitized by render.ts
-          dangerouslySetInnerHTML={{ __html: html || `<p class="tw-placeholder">${escapeText(placeholder)}</p>` }}
-        />,
+        >
+          {readDoc.children.map((b, i) => {
+            // Footnote defs are collected/emitted at the document end in the
+            // string path; in the interleaved path they are skipped (matching
+            // renderBlocks' document flow).
+            if (b.type === 'footnoteDef') return null;
+            const island = renderIsland(b, islands);
+            if (island) return <React.Fragment key={`${i}-${b.from}`}>{island}</React.Fragment>;
+            return (
+              <div
+                key={`${i}-${b.from}`}
+                className="tw-block"
+                data-tw-from={b.from}
+                data-tw-to={b.to}
+                // sanitized by render.ts
+                dangerouslySetInnerHTML={{ __html: renderNode(b, renderOpts) }}
+              />
+            );
+          })}
+        </div>,
       );
     }
 
@@ -1068,6 +1232,7 @@ export const TypewrightEditor = React.forwardRef<TypewrightEditorHandle, Typewri
         parseOpts={parseOpts}
         renderOpts={renderOpts}
         bindings={keymapBindings}
+        islands={islands}
         contentRef={collab.active ? collab.contentRef : undefined}
         commentsActive={collab.commentsActive}
         onCommentSelect={collab.commentsActive ? collab.onSourceSelect : undefined}
@@ -1153,6 +1318,8 @@ interface UnifiedProps {
   parseOpts: ParseOptions;
   renderOpts: RenderOptions;
   bindings: Map<string, Command>;
+  /** Executable-island config (sandboxed MDX + Mermaid); inert when off. */
+  islands: IslandCtx;
   /** Ref the collab layer walks for comment highlights + presence carets. */
   contentRef?: React.RefObject<HTMLDivElement | null>;
   /** Whether comments are active (enables selection-to-comment on blocks). */
@@ -1162,7 +1329,7 @@ interface UnifiedProps {
 }
 
 function UnifiedEditor(props: UnifiedProps): React.ReactElement {
-  const { md, mdRef, rootClass, style, readOnly, placeholder, foldingEnabled, showGutter, persistKey, commitValue, register, toolbar, parseOpts, renderOpts, bindings, contentRef, commentsActive, onCommentSelect } = props;
+  const { md, mdRef, rootClass, style, readOnly, placeholder, foldingEnabled, showGutter, persistKey, commitValue, register, toolbar, parseOpts, renderOpts, bindings, islands, contentRef, commentsActive, onCommentSelect } = props;
   const [active, setActive] = React.useState<number | null>(null);
   const [draft, setDraft] = React.useState('');
   // Seed the folded set from persisted heading keys (re-anchored to the current
@@ -1390,6 +1557,10 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
         if (hidden.has(i)) return null;
         const isHeading = b.type === 'heading';
         const folded = isHeading && folds.has(i);
+        // Executable islands (MDX / Mermaid) render read-only in unified/preview —
+        // like tables, they are NOT click-to-edit source; the raw source is
+        // reached in `edit` mode. Null unless the host wired the extension up.
+        const islandEl = renderIsland(b, islands);
         return (
           <div
             className="tw-row"
@@ -1460,6 +1631,8 @@ function UnifiedEditor(props: UnifiedProps): React.ReactElement {
                 onBlur={() => { captureFlip(); commit(); }}
                 onEscape={() => { captureFlip(); commit(); }}
               />
+            ) : islandEl ? (
+              islandEl
             ) : b.type === 'table' && !readOnly ? (
               // A table is edited in its grid, not via a click-to-reveal source
               // textarea; the grid emits already-scoped splices we apply verbatim.
