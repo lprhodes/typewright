@@ -30,11 +30,14 @@ Everything is deterministic: the fixtures are generated with **no `Math.random`*
 |---|---|
 | Machine | Apple M5, macOS 26.4 (arm64) |
 | Runtime | Node v22.22.3 |
-| Harness | vitest 3.2.7 (`bench`, tinybench), esbuild 0.27.7 |
+| Harness | vitest 3.2.6 (`bench`, tinybench), esbuild 0.27.7 |
 | Date | 2026-07-07 |
 
-Absolute times track the machine; the **ratios** (incremental vs. full parse) are
-the portable signal.
+Absolute times track the machine — and swing with its load between sessions (an
+earlier, busier session on the same hardware read ~1.7× slower across the board);
+the **ratios** (incremental vs. full parse) are the portable signal. §1, §2, and
+§5 below are all from the **same** clean `pnpm bench` run so they are mutually
+consistent.
 
 ## Workloads (SPEC §10)
 
@@ -52,86 +55,112 @@ i.e. the shapes that actually exercise the block + inline parsers.
 
 Full parse of a cold string into a whole AST. Because each call allocates a fresh
 AST, wall-clock samples fold in periodic **GC pauses** — so `mean`/`p75` are
-long-tailed and **swing run-to-run** (across two runs the 50 KB `p75` was 11.6 ms
-then 83.8 ms; that is GC *scheduling*, not parse work). The **`min` is the stable,
-GC-free parse floor** — reproducible across runs — so it is the headline; the
-`p75` range gives the with-GC "typical".
+long-tailed and can **swing run-to-run** when GC schedules a collection inside the
+window. The **`min` is the stable, GC-free parse floor** — the most reproducible
+figure — so it is the headline; the `p75` here is from this clean run.
 
-| Workload | **min (parse floor)** | p75 (incl. GC, observed range) | ops/s |
+| Workload | **min (parse floor)** | p75 (this run) | ops/s |
 |---|---|---|---|
-| 5.2 KB | **~0.22 ms** | 0.4 – 0.7 ms | ~430 – 1,650 |
-| 50.5 KB | **~2.6 ms** | 11 – 84 ms · GC | ~13 – 93 |
-| 1024.5 KB | **~76 ms** | 130 – 315 ms · GC | ~3 – 9 |
+| 5.2 KB | **~0.17 ms** | ~0.25 ms | ~3,900 |
+| 50.5 KB | **~1.9 ms** | ~2.7 ms | ~410 |
+| 1024.5 KB | **~43 ms** | ~45 ms | ~22 |
 
 **vs. SPEC target — cold parse < 16 ms @ 50 KB:** **met** — the parse floor is
-~2.6 ms; even the cleaner run's *typical* p75 (11.6 ms) sits under 16 ms (the
-noisier run's p75 is a GC tail, not parse cost). The 1 MB cold parse (~76 ms
-floor) is a one-time load cost, not per-keystroke — the incremental path below is
-what a running editor pays.
+~1.9 ms and this run's p75 (~2.7 ms) is well under 16 ms. The 1 MB cold parse
+(~43 ms floor) is a one-time load cost, not per-keystroke — the incremental path
+below is what a running editor pays.
 
 ## 2. Keystroke reparse — `parseIncremental()` vs full `parse()`
 
 The reparse a single inserted character triggers. `parseIncremental` reuses the
-block prefix *before* the edit and reparses from there to end-of-document
-(correctness is the oracle — a one-way property test asserts it is deep-equal to
-a full `parse(nextSrc)`; it never trades correctness for speed). So its cost
-scales with **how much document sits after the caret**. We report two honest edit
-positions rather than cherry-picking one:
+block prefix *before* the edit and, when a safe block boundary can be **proven**,
+bounds the reparse to the dirty block(s) and re-offsets the unchanged suffix
+(`tryReuseSuffix` in `parser.ts`) — so the reparsed *span* is O(edited block),
+not the whole tail. Correctness is the oracle: a one-way property test asserts the
+result is deep-equal to a full `parse(nextSrc)` across the corpus (opts on and
+off); it never trades correctness for speed, and declines the fast path (falling
+back to reparse-to-EOF) whenever the boundary can't be proven. We report **three**
+honest edit positions:
 
-- **@mid** — insert at the 50% mark (worst realistic interactive edit).
-- **@end** — insert at the 98% mark (typing at the end / streaming append — the
-  common case).
+- **@top** — insert at the 5% mark (edit near the top of a large doc).
+- **@mid** — insert at the 50% mark (worst *central* interactive edit).
+- **@end** — insert at the 98% mark (typing at the end / streaming append).
 
-Numbers below are the **GC-free `min`** (the stable, reproducible floor across
-runs) for each operation. The `min` for `parseIncremental` was within ~1% across
-two runs (e.g. 50 KB @mid: 1.43 ms then 1.44 ms), so the ratios are solid.
+Numbers below are the **GC-free `min`** (the stable, reproducible floor) for each
+operation, from the run in the environment block above.
 
-### 50.5 KB (the SPEC keystroke target workload)
+### The reparse span is now bounded (`parseIncrementalWithStats`, 1 MB doc)
 
-| Operation | **min (floor)** | speedup vs full |
+| Edit | Prefix reused | Reparsed line span | Suffix blocks reused |
+|---|---|---|---|
+| @top (5%) | 308 | 925 → 927 (**2 lines**) | 5,811 |
+| @mid (50%) | 3,063 | 9,168 → 9,170 (**2 lines**) | 3,056 |
+| @end (98%) | 5,998 | 17,954 → 17,956 (**2 lines**) | 121 |
+
+Every position reparses a **2-line span** and reuses the rest — the prior
+"reparses to end-of-document" behaviour is gone. This is the structural win.
+
+### 50.5 KB (the SPEC keystroke target workload) — min floors
+
+| Operation | **min (floor)** | vs full `parse()` |
 |---|---|---|
-| keystroke @mid — `parseIncremental()` | **1.44 ms** | **~1.9×** |
-| keystroke @mid — full `parse()` (baseline) | 2.73 ms | — |
-| keystroke @end — `parseIncremental()` | **0.31 ms** | **~8×** |
-| keystroke @end — full `parse()` (baseline) | 2.56 ms | — |
+| keystroke @mid — `parseIncremental()` | **1.21 ms** | **~1.6× faster** |
+| keystroke @mid — full `parse()` (baseline) | 1.93 ms | — |
+| keystroke @end — `parseIncremental()` | **0.20 ms** | **~8.6× faster** |
+| keystroke @end — full `parse()` (baseline) | 1.72 ms | — |
+| keystroke @top — `parseIncremental()` | 2.42 ms | **~0.8× (slower)** |
+| keystroke @top — full `parse()` (baseline) | 1.95 ms | — |
 
-The reused prefix is 152 blocks @mid and 297 @end.
+### 5.2 KB and 1024.5 KB — min floors
 
-### 5.2 KB and 1024.5 KB (min floors)
-
-| Workload | op | `parseIncremental` | full `parse` | speedup |
+| Workload | op | `parseIncremental` | full `parse` | vs full |
 |---|---|---|---|---|
-| 5.2 KB | @mid | 0.14 ms | 0.21 ms | ~1.5× |
-| 5.2 KB | @end | 0.035 ms | 0.22 ms | ~6× |
-| 1024.5 KB | @mid | 34 ms | 68 ms | ~2.0× |
-| 1024.5 KB | @end | 6.7 ms | 66 ms | ~10× |
+| 5.2 KB | @top | 0.26 ms | 0.20 ms | ~0.8× (slower) |
+| 5.2 KB | @mid | 0.13 ms | 0.20 ms | ~1.5× |
+| 5.2 KB | @end | 0.032 ms | 0.23 ms | ~7× |
+| 1024.5 KB | @top | 52.5 ms | 44.2 ms | ~0.8× (slower) |
+| 1024.5 KB | @mid | 30.1 ms | 43.7 ms | ~1.45× |
+| 1024.5 KB | @end | 4.24 ms | 43.8 ms | ~10× |
 
-Reuse (from `parseIncrementalWithStats`), 1 MB doc: **@mid** reuses 3,063 blocks
-and reparses lines 9,168→18,317; **@end** reuses 5,998 and reparses
-17,954→18,317. (`mean`/`p75` for the 1 MB rows carry a large GC tail — @mid mean
-~59–80 ms, @end mean ~13–21 ms — so the `min` floors above are the honest signal.)
+**Two honest costs still scale with the tail** — the bounded *span* is not the
+whole story:
+
+1. **The suffix re-offset is O(remaining blocks).** Re-offsetting the reused
+   suffix deep-clones and shifts every trailing node. For a **near-top** edit that
+   is almost the whole document, so `parseIncremental` @top is actually a hair
+   **slower than a full parse** (52.5 ms vs 44.2 ms at 1 MB) — the clone costs more
+   than it saves when there's little document to skip. The win is real for @mid
+   (~1.45×) and large for @end (~10×), where progressively less tail must be
+   re-offset. Making the re-offset lazy so early-doc edits also win is roadmap.
+2. **An edit inside the very first block falls back to a full parse.** The
+   reuse-cut needs a block *before* the edit to anchor prefix safety, so editing
+   block 0 (e.g. a document's leading H1) has no reusable prefix and reparses the
+   whole doc — a documented boundary (`parser.incremental.test.ts`), not a bug.
 
 ### vs. SPEC targets — the honest verdict
 
 | SPEC target | Workload | Measured (parse floor) | Verdict |
 |---|---|---|---|
-| Keystroke → paint p95 < 8 ms | 50 KB, mid-doc edit | `parseIncremental` @mid **~1.4 ms** floor (typical p75 ~4 ms; GC tail to ~23 ms) | **Parse fits the budget.** Full INP (incl. layout/paint) is browser-measured — **to be run**, below. |
-| Large-doc typing p95 < 8 ms | 1 MB, viewport-bounded | `parseIncremental` @end **6.7 ms** floor (mean ~13–21 ms); @mid **34 ms** floor | **Missed for the parse component.** Only best-case near-EOF touches < 8 ms, and only at the floor. |
+| Keystroke → paint p95 < 8 ms | 50 KB, mid-doc edit | `parseIncremental` @mid **1.21 ms** floor | **Parse fits the budget.** Full INP (incl. layout/paint) is browser-measured — **to be run**, below. |
+| Large-doc typing p95 < 8 ms | 1 MB | @end **4.24 ms**; @mid **30.1 ms**; @top **52.5 ms** | **Missed for central/early edits, met near-EOF.** The bounded span improved @mid (~34 ms → ~30 ms floor) but @top/@mid stay over budget because the suffix re-offset scales with the tail. |
 
-**The 1 MB miss, stated plainly:** `parseIncremental` currently reparses from the
-edit to end-of-document, so a mid-document keystroke in a 1 MB file re-tokenizes
-~half the doc (~34 ms floor, tens of ms more under GC). This is a deliberate
-correctness-first design (no fragile offset-shift pass). Two things make 1 MB
-editing viable in practice despite it, and one is future work:
+**The 1 MB miss, stated plainly:** the tightening bounds the reparse *span* to the
+dirty block(s) (shipped — see the stats table above), which is the correctness-
+preserving structural win. But total wall-clock for a keystroke still carries the
+O(tail) cost of re-offsetting the reused suffix, so a mid-document 1 MB keystroke
+is ~30 ms (down from ~34 ms) and a near-top one does not yet beat a full parse.
+Two things make 1 MB editing viable in practice, and the remaining wins are
+roadmap:
 
 1. **Viewport-bounded rendering** keeps *paint* cheap regardless of parse span —
    only the edited block's rendered output changes on screen (the bounded-DOM
    assertion in `bench/keystroke.md`).
 2. **Edit locality** — while typing you edit near the caret's region; append/
-   stream (@end) has a ~6.7 ms floor.
-3. **Future work:** bound the reparse span to the *dirty block(s) only* (stop at
-   the next safe block boundary after the edit instead of running to EOF) to pull
-   the mid-doc 1 MB case under budget. Tracked, not yet done.
+   stream (@end) has a ~4.2 ms floor.
+3. **Roadmap:** make the suffix re-offset lazy (shift offsets on read instead of
+   deep-cloning every trailing node) so early-doc edits win too, and support a
+   block-0 cut so first-block edits are bounded. The reparse *span* is already
+   bounded; these close the remaining wall-clock gap.
 
 ## 3. Bundle size (`pnpm size`)
 
@@ -142,10 +171,10 @@ engine's small size is a core promise.
 
 | Entry | Minified | **gzip** | Budget (gzip) | Status |
 |---|---|---|---|---|
-| `typewright/core` | 38.49 KB | **12.67 KB** | 14 KB · hard | ok |
-| `typewright/streaming` | 21.90 KB | **8.03 KB** | 9 KB · soft | ok |
-| `typewright/mdx` | 14.50 KB | **5.41 KB** | 7 KB · soft | ok |
-| `typewright` (react) | 141.17 KB | **42.95 KB** | 48 KB · soft | ok |
+| `typewright/core` | 40.05 KB | **13.20 KB** | 14 KB · hard | ok |
+| `typewright/streaming` | 21.90 KB | **8.04 KB** | 9 KB · soft | ok |
+| `typewright/mdx` | 14.88 KB | **5.57 KB** | 7 KB · soft | ok |
+| `typewright` (react) | 155.93 KB | **47.77 KB** | 48 KB · soft | ok |
 
 `pnpm size` exits non-zero if `core` exceeds its gzip budget. Budgets sit ~15%
 over today's measured size, so a real regression trips the gate while ordinary
@@ -188,7 +217,7 @@ run, on the same machine, under the same GC behaviour:
   parser is driven to completion with `parser.parse(src)`, producing a **full
   Lezer syntax tree** that covers the whole document (`tree.length === src.length`
   — verified and logged per fixture; no viewport laziness, no timeout that could
-  abort on the 1 MB doc). `EditorState.create` (document construction, ~2–10 ms) is
+  abort on the 1 MB doc). `EditorState.create` (document construction, ~1–10 ms) is
   excluded from the parse column so the comparison is parse-vs-parse.
 
 **What each measures — the honest caveat.** These are *different artefacts*, not
@@ -209,24 +238,24 @@ three runs.
 
 | Workload | Typewright `parse()` **min** | CodeMirror-6 **min** | Typewright is |
 |---|---|---|---|
-| 5.2 KB | **~0.25 ms** | ~1.0 – 1.1 ms | **~4× faster** |
-| 50.5 KB | **~2.5 – 2.6 ms** | ~11.6 – 20.6 ms | **~4.5 – 8× faster** |
-| 1024.5 KB | **~75 – 79 ms** | ~294 – 417 ms | **~3.8 – 5.3× faster** |
+| 5.2 KB | **~0.16 ms** | ~0.68 ms | **~4.2× faster** |
+| 50.5 KB | **~1.7 ms** | ~6.8 ms | **~4.1× faster** |
+| 1024.5 KB | **~45 ms** | ~143 ms | **~3.2× faster** |
 
 Across the *whole* distribution (tinybench's throughput/`mean` summary, GC tails
-included) the ratio is noisier still: over three runs Typewright's summarised
-speed-up was ~5–8× at 50 KB and ~4–11× at 1 MB, while at 5 KB one GC-heavy run
-even flipped the *mean* to a statistical tie (CodeMirror ~1.01×) — even though that
-same run's `min` floor kept Typewright ~4× ahead (0.26 ms vs 1.09 ms). That flip is
-exactly why the GC-free `min` floors above are the honest, less-noisy signal and
-the mean is not.
+included) this run's summarised speed-up was **3.9× / 3.7× / 3.3×** for the three
+fixtures — close to the floor ratios, because the run was GC-light. In earlier,
+GC-heavier sessions the `mean` is noisier (a GC-heavy 5 KB run can flip the *mean*
+to a near-tie even while the `min` floor keeps Typewright ~4× ahead), which is
+exactly why the GC-free `min` floors above are the honest, less-noisy signal.
 
 **Read this plainly.** On these cold-parse workloads Typewright is consistently
-faster — by roughly **4–8× at the GC-free floor** (about **4×** at 5 KB, widening
-on the larger docs). That is expected and not a
+faster — by roughly **3–4× at the GC-free floor** (about **4×** on the small and
+medium docs, narrowing to **~3.2×** at 1 MB as absolute costs grow). That is
+expected and not a
 magic constant: Typewright builds a lean block AST specialised for GFM+MDX, while
 Lezer builds a complete, general syntax tree with more nodes and machinery. It is
-**not** a claim that Typewright's editor is 4–5× faster end to end — CodeMirror is
+**not** a claim that Typewright's editor is 3–4× faster end to end — CodeMirror is
 a mature, incremental, viewport-lazy editor, and the interactive win (if any) is
 decided by keystroke-to-paint on a live view, which is the still-pending INP
 measurement below, **not** by this batch cold-parse number. SPEC §10 is explicit
