@@ -58,6 +58,11 @@
       "import": "./dist/streaming/index.js",
       "require": "./dist/streaming/index.cjs"
     },
+    "./mdx": {
+      "types": "./dist/mdx/index.d.ts",
+      "import": "./dist/mdx/index.js",
+      "require": "./dist/mdx/index.cjs"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
@@ -73,13 +78,21 @@
   },
   "peerDependencies": {
     "react": ">=18",
-    "react-dom": ">=18"
+    "react-dom": ">=18",
+    "esbuild-wasm": "*",
+    "@swc/wasm-web": "*"
   },
   "peerDependenciesMeta": {
     "react": {
       "optional": true
     },
     "react-dom": {
+      "optional": true
+    },
+    "esbuild-wasm": {
+      "optional": true
+    },
+    "@swc/wasm-web": {
       "optional": true
     }
   },
@@ -88,6 +101,7 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.4",
+    "jsdom": "^29.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tsup": "^8.3.5",

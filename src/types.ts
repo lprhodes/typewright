@@ -41,11 +41,31 @@ export interface MermaidOptions {
   enabled: boolean;
   /** Mermaid theme name; diagrams render inside the isolated sandbox. */
   theme?: string;
+  /**
+   * Supplies the Mermaid engine to run **inside** the opaque-origin sandbox.
+   * Returns the engine's JavaScript *source*, which Typewright inlines as an
+   * `<script>` in the sandbox document. Source is used (rather than a script
+   * URL) deliberately: the sandbox CSP is `script-src 'unsafe-inline'` only, so
+   * an inline engine needs no CSP relaxation and no cross-origin fetch. The
+   * injected source is expected to expose either a global
+   * `self.__twMermaidRender(src): Promise<string>` returning SVG, or the
+   * standard `self.mermaid` object (`mermaid.render(id, src)`). May be async so
+   * the host can lazy-load the engine. Without it, `mermaid` fences render as a
+   * plain code block (unchanged v0.1 behaviour).
+   */
+  getEngine?: () => Promise<string> | string;
 }
 
 export interface MathOptions {
   enabled: boolean;
   engine?: 'katex' | 'custom';
+  /**
+   * Host-supplied math renderer: given the raw `$…$` / `$$…$$` source and
+   * whether it is display (block) math, returns **already-sanitized** HTML that
+   * the renderer inserts verbatim. The host owns sanitization (e.g. KaTeX with
+   * `trust: false`). Without it, math renders as escaped source.
+   */
+  render?: (src: string, display: boolean) => string;
 }
 
 export interface SyntaxHighlightOptions {
