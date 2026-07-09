@@ -195,9 +195,10 @@ import { StreamingPreview } from 'typewright';
 
 Framework-agnostic, zero-dependency:
 
-- `parse(src): Document` — offset-exact GFM/MDX-markup AST.
+- `parse(src, opts?): Document` — offset-exact GFM/MDX-markup AST. `ParseOptions`: `math`, `footnotes`, `defLists`, `frontmatter`.
 - `parseIncremental(prev, prevSrc, change, nextSrc): Document` — reuse-the-prefix reparse, deep-equal to a full `parse` (property-tested).
-- `renderToHtml(doc, opts?)` / `renderInline(nodes)` / `renderNode(node)` — sanitized HTML. `safeUrl(url)`. `RenderOptions.highlight` threads the tokenizer in.
+- `renderToHtml(doc, opts?)` / `renderInline(nodes)` / `renderNode(node)` — sanitized HTML. `safeUrl(url)`. `RenderOptions.highlight` threads the tokenizer in; `headingIds` and `classMap` cover the static-site cases below.
+- `slugify(text)` / `createSlugger()` / `outline(doc): HeadingEntry[]` — heading slugs and the document outline (table-of-contents input).
 - `highlightToHtml(lang, code)` — native, zero-dep syntax colouring (escaped `tw-tok-*` spans) for js/ts/jsx/tsx, json, css, html, md, python, bash, sql.
 - `collectMarkers(doc)` / `hiddenMarkers(doc, sel)` / `activeBlockIndex(doc, offset)` — unified-mode logic.
 - `headingFoldRanges(doc)` — fold ranges.
@@ -206,6 +207,59 @@ Framework-agnostic, zero-dependency:
 - `cellSourceRange` / `addRow` / `addColumn` / `removeRow` / `removeColumn` / `setAlignment` — pure GFM table-grid helpers.
 - `TextDoc` — immutable document model with transaction edits + position mapping.
 - The AST node types (`Document`, `Block`, `Inline`, …).
+
+### Static sites & server rendering — `typewright/core`
+
+The core has no DOM dependency, so `parse` + `renderToHtml` run in Node — inside a
+Next.js Server Component, an Astro page, an SSG build step. Three options make it a
+complete content pipeline, and rendered content ships **zero client JavaScript**.
+
+**Frontmatter** (`ParseOptions.frontmatter`). The parser *locates* a leading `---`
+block and hands back its raw text on `doc.frontmatter`; it never interprets it.
+Typewright has zero runtime dependencies and a YAML parser is not one it will grow,
+so the host brings its own and validates the result. Only a *closed* block at offset
+0 qualifies; anything else parses exactly as before. Frontmatter is not a `Block` —
+it never reaches `children`, so it cannot be rendered or folded by accident.
+
+**Heading ids + outline** (`RenderOptions.headingIds`, `outline`). One allocator
+issues every id, and both the renderer and `outline()` read from it — so a
+table-of-contents built from `outline(doc)` always links anchors that exist. Slugs
+are GitHub-style, keep letters/digits of any script, and are deduplicated
+(`overview`, `overview-2`, …) against everything already issued, so an auto-suffix
+can never collide with a literal heading of the same slug.
+
+**Class mapping** (`RenderOptions.classMap`). Attach your design system's class
+names to the elements the renderer emits, instead of writing brittle descendant CSS
+or walking the DOM afterwards. Entries are additive: where the renderer already
+emits a class (`tw-footnotes`, `language-ts`), the mapped name is appended. Class
+values are attribute-escaped. Omitting `classMap` yields byte-identical output.
+
+```ts
+import { parse, renderToHtml, outline } from 'typewright/core';
+import { parse as parseYaml } from 'yaml';           // host's choice
+import { z } from 'zod';
+
+const doc = parse(source, { frontmatter: true, footnotes: true });
+const meta = FrontmatterSchema.parse(parseYaml(doc.frontmatter?.value ?? ''));
+
+const html = renderToHtml(doc, {
+  headingIds: true,
+  classMap: { blockquote: 'callout', table: 'spec-table', h2: 'article-h2' },
+});
+const toc = outline(doc).filter((h) => h.level === 2);   // ids match `html` exactly
+```
+
+Optional default styling ships at `typewright/styles.css` — scope it by putting
+`class="tw-content"` on the wrapper you inject into. It is entirely custom-property
+driven (light + dark, `prefers-color-scheme` and `data-theme`), and contains no bare
+element selectors, so it cannot leak into the surrounding page. Hosts with their own
+design system should skip it and use `classMap`.
+
+> **MDX is not executed here.** `renderToHtml` emits raw HTML and MDX flow **escaped**
+> inside a `<pre>` — that is the sanitizer boundary that lets it render untrusted model
+> output. To *run* MDX components, use `typewright/mdx`, which evaluates them in an
+> opaque-origin sandboxed iframe (see §3 and §9). For a public, SEO-critical page,
+> render Markdown through `renderToHtml` and keep components in the page template.
 
 ### Streaming — `typewright/streaming`
 
@@ -220,7 +274,8 @@ Framework-agnostic, zero-dependency:
 | Import | Contents | React? |
 |---|---|---|
 | `typewright` | `<TypewrightEditor>`, `<StreamingPreview>`, types | yes (peer) |
-| `typewright/core` | parser (+ incremental), renderer, highlight, unified/fold logic, commands, table + comment helpers, model, AST | no |
+| `typewright/core` | parser (+ incremental, frontmatter), renderer (+ heading ids, classMap), outline/slugs, highlight, unified/fold logic, commands, table + comment helpers, model, AST | no |
+| `typewright/styles.css` | optional default content styles, scoped to `.tw-content` | no |
 | `typewright/streaming` | stream controller + anticipation renderer | no |
 | `typewright/mdx` | sandboxed MDX execution (transform adapters + opaque-origin iframe host) | no |
 

@@ -245,6 +245,14 @@ The full, documented contract is [`src/types.ts`](./src/types.ts). Shape:
 
 Key config surfaces: `mode`, `extensions` (`gfm`/`mdx`/`mermaid`/`math`/`syntaxHighlight`, each a boolean or an options object), `folding`, `keymap` (preset + binding overrides), `theme` (appearance + token overrides), `readOnly`, `overscan`. Every feature is independently toggleable; nothing is mandatory but the core editor.
 
+**Headless render path** (`typewright/core`, no DOM — runs in Node/SSG):
+
+- `parse(src, ParseOptions)` — `math` / `footnotes` / `defLists` / `frontmatter`, each defaulting to `false`. `frontmatter` locates a closed leading `---` block onto `doc.frontmatter` and **does not interpret it** (a YAML parser would be a runtime dependency, which §7's zero-dependency rule forbids outside the MDX transform boundary). Frontmatter is not a `Block` and never enters `children`.
+- `renderToHtml(doc, RenderOptions)` — `highlight` / `math` hooks, plus `headingIds` (unique, URL-safe heading anchors) and `classMap` (additive class names on emitted elements, attribute-escaped). Both default off; omitting them yields byte-identical output to prior versions.
+- `outline(doc)` / `slugify` / `createSlugger` — the table-of-contents input. `outline` and `renderToHtml` read ids from **one allocator keyed by node identity**, so a TOC's anchors provably match the rendered `id`s.
+
+Rendered content ships no client JavaScript. `renderToHtml` still escapes raw HTML and MDX per §11 — server-rendering MDX *components* is out of scope for the sanitizing renderer.
+
 **Stability policy:** the type surface is the contract and is versioned semver; internal engine modules are private and may change freely.
 
 ---

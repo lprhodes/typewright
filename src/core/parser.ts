@@ -31,6 +31,7 @@ import type {
   Emphasis,
   FootnoteDef,
   FootnoteRef,
+  Frontmatter,
   Heading,
   HtmlBlock,
   Image,
@@ -1220,11 +1221,49 @@ function parseInlineSegs(segs: Seg[]): Inline[] {
  * Entry point
  * ------------------------------------------------------------------ */
 
+/** A `---` delimiter line: exactly three hyphens, trailing spaces tolerated. */
+const FM_FENCE = /^---[ \t]*$/;
+
+/**
+ * Locate a leading frontmatter block, if the source opens with a CLOSED one.
+ *
+ * Returns the node plus the index of the first line after the closing fence, or
+ * `null` when there is no frontmatter — in which case the caller parses the
+ * source exactly as it always has (an unclosed `---` is still a thematic break).
+ */
+function takeFrontmatter(
+  lines: Line[],
+): { node: Frontmatter; nextLine: number } | null {
+  const open = lines[0];
+  if (!open || !FM_FENCE.test(open.text)) return null;
+
+  for (let close = 1; close < lines.length; close++) {
+    const line = lines[close]!;
+    if (!FM_FENCE.test(line.text)) continue;
+    // Rejoin the inner lines with `\n` rather than slicing `src`: each Line's
+    // `text` is already newline-free, so a CRLF source yields the same value as
+    // an LF one. `---\n---` has no inner lines and yields `''`.
+    const inner: string[] = [];
+    for (let i = 1; i < close; i++) inner.push(lines[i]!.text);
+    return {
+      node: {
+        type: 'frontmatter',
+        from: open.from,
+        to: line.to,
+        value: inner.join('\n'),
+      },
+      nextLine: close + 1,
+    };
+  }
+  return null; // unclosed: not frontmatter, parse `---` as it always was
+}
+
 /**
  * Parse Markdown/MDX source into an offset-exact {@link Document}.
  *
- * `options` gates the opt-in extensions (math, footnotes, definition lists);
- * every flag defaults to `false`, so `parse(src)` is unchanged from before.
+ * `options` gates the opt-in extensions (math, footnotes, definition lists,
+ * frontmatter); every flag defaults to `false`, so `parse(src)` is unchanged
+ * from before.
  */
 export function parse(src: string, options?: ParseOptions): Document {
   opts = {
@@ -1233,8 +1272,16 @@ export function parse(src: string, options?: ParseOptions): Document {
     defLists: options?.defLists === true,
   };
   const lines = splitLines(src);
-  const children = parseBlocks(lines);
-  return { type: 'document', from: 0, to: src.length, children };
+
+  // Frontmatter is consumed off the FRONT of the line array, never sliced out of
+  // `src`: each Line already carries absolute offsets, so every block parsed from
+  // the remainder stays offset-exact against the original source string.
+  const fm = options?.frontmatter === true ? takeFrontmatter(lines) : null;
+  const children = parseBlocks(fm ? lines.slice(fm.nextLine) : lines);
+
+  const doc: Document = { type: 'document', from: 0, to: src.length, children };
+  if (fm) doc.frontmatter = fm.node;
+  return doc;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1518,6 +1565,20 @@ function runIncremental(
   // prefix `[0, from)` is byte-identical proves every reused prefix identical.
   if (prevSrc.slice(0, from) !== nextSrc.slice(0, from)) return full();
 
+  // Frontmatter is a document-level prefix, not a block, so the block-boundary
+  // reuse proof below says nothing about it. An edit reaching the block — or its
+  // closing `---`, whose last character sits at `frontmatter.to` — can create or
+  // destroy the whole thing, so never take the fast path there. With the flag on
+  // and no frontmatter present, `fmEnd` is 0: an insert at offset 0 could open a
+  // block, and is likewise refused.
+  //
+  // Past that point frontmatter lies entirely before the edit, so the byte-
+  // identical-prefix check above proves it unchanged, offsets included, and it
+  // is carried over verbatim.
+  if (options?.frontmatter === true && from <= (prev.frontmatter?.to ?? 0)) {
+    return full();
+  }
+
   // Offset shift applied to any source position at/after the edit end `to`.
   const delta = change.insert.length - (to - from);
 
@@ -1543,11 +1604,19 @@ function runIncremental(
     // Try to bound the reparse on the right and reuse the unchanged suffix; this
     // is what makes a top-of-doc edit cheap. If no clean boundary can be proven,
     // fall back to reparsing the whole tail (still correct, just not as tight).
+    // Guarded above: any edit reaching the frontmatter took the full-parse path,
+    // so `prev.frontmatter` is byte-identical in `nextSrc` at the same offsets.
+    const reuseDoc = (children: Block[]): Document => {
+      const doc: Document = { type: 'document', from: 0, to: nextSrc.length, children };
+      if (prev.frontmatter) doc.frontmatter = prev.frontmatter;
+      return doc;
+    };
+
     const suffix = tryReuseSuffix(blocks, prevSrc, to, delta, nextLines, c);
     if (suffix) {
       const children = blocks.slice(0, k).concat(suffix.dirty, suffix.shifted);
       return {
-        doc: { type: 'document', from: 0, to: nextSrc.length, children },
+        doc: reuseDoc(children),
         stats: {
           fellBack: false,
           reusedBlocks: k,
@@ -1562,7 +1631,7 @@ function runIncremental(
     const tail = parseBlocks(nextLines.slice(c));
     const children = blocks.slice(0, k).concat(tail);
     return {
-      doc: { type: 'document', from: 0, to: nextSrc.length, children },
+      doc: reuseDoc(children),
       stats: {
         fellBack: false,
         reusedBlocks: k,
