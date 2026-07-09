@@ -1,6 +1,6 @@
 {
   "name": "typewright",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "A blazing-fast, from-scratch GitHub Flavored Markdown + MDX editor and streaming previewer for the web. Zero-runtime-dependency engine, Obsidian-style unified live preview, semantic folding, in-place tables, and LLM token-stream rendering that anticipates formatting as it arrives.",
   "type": "module",
   "license": "MIT",
@@ -35,6 +35,7 @@
   ],
   "files": [
     "dist",
+    "styles.css",
     "SPEC.md",
     "README.md",
     "LICENSE"
@@ -63,6 +64,7 @@
       "import": "./dist/mdx/index.js",
       "require": "./dist/mdx/index.cjs"
     },
+    "./styles.css": "./styles.css",
     "./package.json": "./package.json"
   },
   "scripts": {
@@ -76,6 +78,8 @@
     "e2e": "playwright test",
     "bench": "vitest bench --run bench/",
     "size": "tsup && node --experimental-strip-types bench/size.ts",
+    "//prepare": "Builds dist/ when the package is installed straight from git (`github:lprhodes/typewright#ref`), which ships no dist/. npm/pnpm run `prepare` for git deps but not for registry tarballs, so a published install pays nothing.",
+    "prepare": "pnpm run build",
     "prepublishOnly": "pnpm run build"
   },
   "//bench": "The CodeMirror-6 baseline in docs/BENCHMARKS.md is bench-only and NEVER shipped. bench/cm6-baseline.bench.ts runs a real cold-parse comparison (Typewright parse() vs @codemirror/lang-markdown's Lezer parser) from the devDependencies `codemirror`, `@codemirror/lang-markdown`, `@codemirror/state`, `@codemirror/view`. Keep them in devDependencies only — never dependencies/peerDependencies. The bench guards its import in try/catch: if a contributor prunes those devDeps, it registers a skipped placeholder so `pnpm bench` stays green. The full in-browser keystroke-to-paint (INP) comparison against the live CodeMirror view is separate and uses the same devDeps via the Playwright method in bench/keystroke.md.",

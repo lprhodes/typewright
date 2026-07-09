@@ -134,6 +134,31 @@ const next = src + '!';
 const doc2 = parseIncremental(doc, src, { from: src.length, to: src.length, insert: '!' }, next);
 ```
 
+### Static site / server rendering
+
+Because the core runs in Node, a blog or docs page renders on the server with **zero
+client JavaScript**. Frontmatter is located (never interpreted — bring your own YAML
+parser), heading ids are emitted, and `outline()` gives you a table of contents whose
+anchors are guaranteed to match the rendered ids:
+
+```ts
+import { parse, renderToHtml, outline } from 'typewright/core';
+
+const doc = parse(source, { frontmatter: true });
+const meta = parseYaml(doc.frontmatter?.value ?? '');   // your parser, your schema
+
+const html = renderToHtml(doc, {
+  headingIds: true,
+  classMap: { blockquote: 'callout', table: 'spec-table' },  // your design system
+});
+const toc = outline(doc).filter((h) => h.level === 2);
+```
+
+Optional default styles: `import 'typewright/styles.css'` and wrap the output in
+`class="tw-content"`. Note that `renderToHtml` **escapes** raw HTML and MDX rather
+than executing it — that is the sanitizer boundary. To run MDX components, use
+`typewright/mdx` (opaque-origin sandbox). See [FEATURES.md](./docs/FEATURES.md).
+
 ## Configuration
 
 `<TypewrightEditor>` accepts the full [`EditorConfig`](./src/types.ts) surface — `mode`, `toolbar`, `extensions` (`gfm` / `mdx` / `mermaid` / `math` / `syntaxHighlight`), `folding`, `keymap`, `theme`, `readOnly`, `overscan`, and the `onChange` / `onSelectionChange` / `onModeChange` events. The complete, documented contract is `src/types.ts`; the behaviour behind each option is specified in [SPEC.md §9](./SPEC.md#9-public-api).

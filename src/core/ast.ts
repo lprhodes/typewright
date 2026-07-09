@@ -223,9 +223,33 @@ export type Block =
   | FootnoteDef
   | DefList;
 
+/**
+ * A leading `---` delimited metadata block. Opt-in via {@link ParseOptions.frontmatter}.
+ *
+ * The parser LOCATES the block and hands back its raw inner text; it never
+ * interprets it. Typewright has zero runtime dependencies, and a correct YAML
+ * parser is not one it is willing to grow — so the host chooses its own
+ * (`yaml`, `js-yaml`, TOML, JSON, …) and validates the result. `value` excludes
+ * both delimiter lines and the newline before the closing delimiter.
+ *
+ * Frontmatter is NOT a {@link Block}: it never appears in `Document.children`,
+ * so it cannot be rendered, folded, or walked into by accident.
+ */
+export interface Frontmatter extends Pos {
+  type: 'frontmatter';
+  /** Raw text between the delimiter lines, uninterpreted. `''` for an empty block. */
+  value: string;
+}
+
 export interface Document extends Pos {
   type: 'document';
   children: Block[];
+  /**
+   * Present only when {@link ParseOptions.frontmatter} was enabled AND the source
+   * opened with a closed `---` block. Its offsets index the same source string as
+   * every other node.
+   */
+  frontmatter?: Frontmatter;
 }
 
 export type AstNode = Document | Block | ListItem | TableCell | DefItem | Inline;
@@ -243,6 +267,13 @@ export interface ParseOptions {
   footnotes?: boolean;
   /** Parse `term` / `: definition` definition lists. */
   defLists?: boolean;
+  /**
+   * Extract a leading `---` delimited {@link Frontmatter} block onto
+   * `Document.frontmatter` instead of parsing it as a thematic break / setext
+   * heading. Only a *closed* block at offset 0 qualifies; anything else parses
+   * exactly as it does today.
+   */
+  frontmatter?: boolean;
 }
 
 /* ------------------------------------------------------------------ *
@@ -265,6 +296,54 @@ const INLINE_TYPES = new Set([
 
 export function isInline(node: AstNode): node is Inline {
   return INLINE_TYPES.has(node.type);
+}
+
+/**
+ * Flatten a run of inline nodes to their plain-text content — the string a
+ * reader sees with every marker removed. Used to derive heading slugs and
+ * table-of-contents labels.
+ *
+ * Emphasis / strong / strikethrough / link contribute their children's text;
+ * an image contributes its `alt`; an autolink its URL; a soft or hard break a
+ * single space. Math contributes its TeX source, since no rendered form exists
+ * at this layer.
+ */
+export function inlineText(nodes: Inline[]): string {
+  let out = '';
+  for (const node of nodes) {
+    switch (node.type) {
+      case 'text':
+        out += node.value;
+        break;
+      case 'inlineCode':
+      case 'math':
+        out += node.value;
+        break;
+      case 'strong':
+      case 'emphasis':
+      case 'strikethrough':
+      case 'link':
+        out += inlineText(node.children);
+        break;
+      case 'image':
+        out += node.alt;
+        break;
+      case 'autolink':
+        out += node.url;
+        break;
+      case 'break':
+        out += ' ';
+        break;
+      case 'footnoteRef':
+        // A reference marker is chrome, not prose — it never belongs in a slug.
+        break;
+      default: {
+        const _never: never = node;
+        return _never as never;
+      }
+    }
+  }
+  return out;
 }
 
 /** Depth-first walk over the tree; return false from `visit` to skip children. */

@@ -1,0 +1,257 @@
+/* ==========================================================================
+   Typewright — default content styles for `renderToHtml` output.
+
+   OPTIONAL. The renderer emits plain semantic HTML, so a host with its own
+   design system needs nothing from this file — reach for `RenderOptions.classMap`
+   instead and style your own classes.
+
+   This sheet is for everyone else: it makes rendered Markdown look right out of
+   the box. Scope it by putting `tw-content` on the wrapper you inject into:
+
+       <div class="tw-content" innerHTML={renderToHtml(doc)} />
+
+   Nothing here is a bare element selector, so it can never leak into the rest of
+   the page. Every value is a CSS custom property — override any of them on
+   `.tw-content` (or `:root`) to retheme without touching this file.
+
+   Light and dark both ship. Dark follows `prefers-color-scheme` by default and
+   can be forced either way with `data-theme="dark"` / `data-theme="light"` on
+   any ancestor.
+   ========================================================================== */
+
+.tw-content {
+  /* colour */
+  --tw-fg: #1f2328;
+  --tw-fg-muted: #59636e;
+  --tw-fg-faint: #818b98;
+  --tw-bg: transparent;
+  --tw-bg-subtle: #f6f8fa;
+  --tw-border: #d1d9e0;
+  --tw-border-subtle: #e4e8ed;
+  --tw-accent: #0969da;
+  --tw-quote-bar: #d1d9e0;
+  --tw-mark-bg: #fff8c5;
+  --tw-mark-fg: inherit;
+
+  /* type */
+  --tw-font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --tw-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  --tw-font-size: 1rem;
+  --tw-line-height: 1.6;
+
+  /* rhythm + shape */
+  --tw-block-gap: 1rem;
+  --tw-heading-gap: 1.5rem;
+  --tw-radius: 6px;
+
+  color: var(--tw-fg);
+  background: var(--tw-bg);
+  font-family: var(--tw-font);
+  font-size: var(--tw-font-size);
+  line-height: var(--tw-line-height);
+  overflow-wrap: break-word;
+}
+
+@media (prefers-color-scheme: dark) {
+  .tw-content {
+    --tw-fg: #f0f6fc;
+    --tw-fg-muted: #9198a1;
+    --tw-fg-faint: #6b7280;
+    --tw-bg-subtle: #151b23;
+    --tw-border: #3d444d;
+    --tw-border-subtle: #2a313c;
+    --tw-accent: #4493f8;
+    --tw-quote-bar: #3d444d;
+    --tw-mark-bg: #4a3d13;
+  }
+}
+
+/* An explicit theme always wins over the media query, in both directions. */
+[data-theme="dark"] .tw-content,
+.tw-content[data-theme="dark"] {
+  --tw-fg: #f0f6fc;
+  --tw-fg-muted: #9198a1;
+  --tw-fg-faint: #6b7280;
+  --tw-bg-subtle: #151b23;
+  --tw-border: #3d444d;
+  --tw-border-subtle: #2a313c;
+  --tw-accent: #4493f8;
+  --tw-quote-bar: #3d444d;
+  --tw-mark-bg: #4a3d13;
+}
+
+[data-theme="light"] .tw-content,
+.tw-content[data-theme="light"] {
+  --tw-fg: #1f2328;
+  --tw-fg-muted: #59636e;
+  --tw-fg-faint: #818b98;
+  --tw-bg-subtle: #f6f8fa;
+  --tw-border: #d1d9e0;
+  --tw-border-subtle: #e4e8ed;
+  --tw-accent: #0969da;
+  --tw-quote-bar: #d1d9e0;
+  --tw-mark-bg: #fff8c5;
+}
+
+/* ---------- Flow ---------- */
+
+.tw-content > :first-child { margin-top: 0; }
+.tw-content > :last-child { margin-bottom: 0; }
+
+.tw-content p,
+.tw-content ul,
+.tw-content ol,
+.tw-content dl,
+.tw-content table,
+.tw-content pre,
+.tw-content blockquote {
+  margin: 0 0 var(--tw-block-gap);
+}
+
+/* ---------- Headings ---------- */
+
+.tw-content h1,
+.tw-content h2,
+.tw-content h3,
+.tw-content h4,
+.tw-content h5,
+.tw-content h6 {
+  margin: var(--tw-heading-gap) 0 var(--tw-block-gap);
+  font-weight: 600;
+  line-height: 1.25;
+  /* Keep an `#anchor` target clear of a sticky header, when one exists. */
+  scroll-margin-top: var(--tw-scroll-margin, 0);
+}
+
+.tw-content h1 { font-size: 2em; padding-bottom: .3em; border-bottom: 1px solid var(--tw-border-subtle); }
+.tw-content h2 { font-size: 1.5em; padding-bottom: .3em; border-bottom: 1px solid var(--tw-border-subtle); }
+.tw-content h3 { font-size: 1.25em; }
+.tw-content h4 { font-size: 1em; }
+.tw-content h5 { font-size: .875em; }
+.tw-content h6 { font-size: .85em; color: var(--tw-fg-muted); }
+
+/* ---------- Inline ---------- */
+
+.tw-content a { color: var(--tw-accent); text-decoration: none; }
+.tw-content a:hover { text-decoration: underline; }
+.tw-content strong { font-weight: 600; }
+.tw-content em { font-style: italic; }
+.tw-content del { color: var(--tw-fg-muted); }
+.tw-content img { max-width: 100%; height: auto; box-sizing: content-box; }
+.tw-content hr {
+  height: 1px; margin: calc(var(--tw-block-gap) * 1.5) 0;
+  border: 0; background: var(--tw-border);
+}
+.tw-content mark { background: var(--tw-mark-bg); color: var(--tw-mark-fg); }
+
+/* ---------- Code ---------- */
+
+.tw-content code {
+  font-family: var(--tw-font-mono);
+  font-size: .875em;
+  padding: .2em .4em;
+  border-radius: var(--tw-radius);
+  background: var(--tw-bg-subtle);
+}
+
+.tw-content pre {
+  font-family: var(--tw-font-mono);
+  font-size: .875em;
+  line-height: 1.45;
+  padding: 1em;
+  border-radius: var(--tw-radius);
+  background: var(--tw-bg-subtle);
+  /* Long lines scroll the block, never the page. */
+  overflow-x: auto;
+}
+
+/* A `<code>` inside a `<pre>` inherits the block's own background + padding. */
+.tw-content pre code {
+  padding: 0;
+  background: transparent;
+  font-size: inherit;
+  overflow-wrap: normal;
+  white-space: pre;
+}
+
+/* ---------- Lists ---------- */
+
+.tw-content ul, .tw-content ol { padding-left: 2em; }
+.tw-content li + li { margin-top: .25em; }
+.tw-content li > ul, .tw-content li > ol { margin: .25em 0 0; }
+
+/* Task lists: the checkbox replaces the bullet. */
+.tw-content li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.4em; }
+.tw-content input[type="checkbox"] { margin-right: .4em; vertical-align: middle; }
+
+/* ---------- Blockquote ---------- */
+
+.tw-content blockquote {
+  padding: 0 1em;
+  color: var(--tw-fg-muted);
+  border-left: .25em solid var(--tw-quote-bar);
+}
+.tw-content blockquote > :last-child { margin-bottom: 0; }
+
+/* ---------- Tables ---------- */
+
+.tw-content table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  border-collapse: collapse;
+  /* A wide table scrolls inside itself rather than widening the page. */
+  overflow-x: auto;
+}
+.tw-content th, .tw-content td {
+  padding: 6px 13px;
+  border: 1px solid var(--tw-border);
+}
+.tw-content th { font-weight: 600; background: var(--tw-bg-subtle); }
+
+/* ---------- Definition lists ---------- */
+
+.tw-content dt { font-weight: 600; margin-top: .75em; }
+.tw-content dd { margin: 0 0 0 1.5em; color: var(--tw-fg-muted); }
+
+/* ---------- Footnotes (emitted as `tw-*` by the renderer) ---------- */
+
+.tw-content .tw-fnref { font-size: .75em; }
+.tw-content .tw-fnref a { text-decoration: none; }
+
+.tw-content .tw-footnotes {
+  margin-top: calc(var(--tw-block-gap) * 2);
+  padding-top: var(--tw-block-gap);
+  border-top: 1px solid var(--tw-border-subtle);
+  font-size: .875em;
+  color: var(--tw-fg-muted);
+}
+.tw-content .tw-footnotes li { scroll-margin-top: var(--tw-scroll-margin, 0); }
+.tw-content .tw-fn-back { text-decoration: none; margin-left: .25em; }
+
+/* Footnote definitions rendered standalone via `renderNode`. */
+.tw-content .tw-footnote-def { font-size: .875em; color: var(--tw-fg-muted); }
+
+/* ---------- Math (escaped source, when no engine is supplied) ---------- */
+
+.tw-content .tw-math-src {
+  font-family: var(--tw-font-mono);
+  font-size: .875em;
+  color: var(--tw-fg-muted);
+}
+.tw-content div.tw-math-src {
+  padding: 1em;
+  border-radius: var(--tw-radius);
+  background: var(--tw-bg-subtle);
+  overflow-x: auto;
+}
+
+/* ---------- Escaped raw HTML / MDX ---------- *
+   The renderer never emits untrusted markup live; it escapes it into a <pre>.
+   Style it as the inert source it is, so it never masquerades as rendered UI. */
+
+.tw-content pre:not(:has(code)) {
+  color: var(--tw-fg-faint);
+  border: 1px dashed var(--tw-border);
+  background: transparent;
+}

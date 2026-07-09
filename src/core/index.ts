@@ -19,7 +19,10 @@ export * from '../types';
 /* Headless engine surface — parser, renderer, unified-mode, folding, doc model. */
 export { parse, parseIncremental } from './parser';
 export { renderToHtml, renderInline, renderNode, safeUrl } from './render';
-export type { RenderOptions } from './render';
+export type { ClassMap, RenderOptions } from './render';
+/* Heading slugs, ids, and the document outline (table-of-contents input). */
+export { slugify, createSlugger, collectHeadings, buildHeadingIds, outline } from './outline';
+export type { HeadingEntry } from './outline';
 export { collectMarkers, hiddenMarkers, activeBlockIndex } from './unified';
 export type { Marker } from './unified';
 export { headingFoldRanges } from './fold';
