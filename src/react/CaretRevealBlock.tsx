@@ -326,6 +326,14 @@ export function paintSegments(root: HTMLElement, segs: Segment[], hidden: Hidden
       const span = doc.createElement('span');
       span.className = 'tw-syntax';
       span.setAttribute('data-mark', seg.markerKind ?? '');
+      // A list marker keeps its raw source (`- `, `1. `) for exact offsets, but when
+      // hidden it renders a bullet/number in place (the Obsidian live-preview idiom)
+      // — otherwise the list loses its markers at rest. `data-bullet` carries the
+      // glyph the CSS shows: the number for an ordered item, a bullet otherwise.
+      if (seg.markerKind === 'listMarker') {
+        const ordered = /(\d+)[.)]/.exec(seg.text);
+        span.setAttribute('data-bullet', ordered ? `${ordered[1]}.` : '•');
+      }
       const key = markerKeyLocal(seg.from, seg.to, blockFrom);
       span.setAttribute('data-from', String(seg.from - blockFrom));
       span.setAttribute('data-to', String(seg.to - blockFrom));
@@ -746,5 +754,11 @@ export const CARET_REVEAL_CSS = `
 /* Hidden marker: collapsed out of layout, but its source chars stay in the DOM
    (and in this component's offset mapping) — never removed from the string. */
 .tw-syntax--hidden{display:none}
+/* A hidden LIST marker is the exception: its raw source ('- ', '1. ') stays present
+   but zero-width (offsets stay exact), and a bullet/number glyph renders in its
+   place, so a bulleted/numbered list keeps its markers at rest (live-preview).
+   Revealing the marker (caret on it) restores the raw glyphs. */
+.tw-caret-block .tw-syntax[data-mark="listMarker"].tw-syntax--hidden{display:inline;font-size:0}
+.tw-caret-block .tw-syntax[data-mark="listMarker"].tw-syntax--hidden::before{content:attr(data-bullet) "\\2002";font-size:1rem;color:var(--tw-muted)}
 @media (prefers-reduced-motion: reduce){ .tw-caret-block{transition:none} }
 `;
