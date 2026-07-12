@@ -103,7 +103,11 @@ function toggleWrap(text: string, sel: Sel, marker: string): CommandResult {
 
 function insertLink(text: string, sel: Sel): CommandResult {
   const { from, to } = norm(sel);
-  const label = text.slice(from, to) || 'text';
+  // A link needs text to wrap. With no selection there is nothing to turn into a
+  // link, so this is a no-op — inserting a `[text](https://)` placeholder here
+  // just litters the document with an orphaned link (it renders as a stray word).
+  if (from === to) return { text, selection: sel };
+  const label = text.slice(from, to);
   const url = 'https://';
   const inserted = `[${label}](${url})`;
   const t = text.slice(0, from) + inserted + text.slice(to);
