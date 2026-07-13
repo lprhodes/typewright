@@ -36,6 +36,12 @@ describe('applyCommand', () => {
     expect(r.text.slice(r.selection.from, r.selection.to)).toBe('https://');
   });
 
+  it('is a no-op with no selection (no [text](https://) placeholder litter)', () => {
+    const r = applyCommand('hello', sel(5, 5), 'link');
+    expect(r.text).toBe('hello');
+    expect(r.selection).toEqual({ from: 5, to: 5 });
+  });
+
   it('sets a heading level on the line', () => {
     const r = applyCommand('Title', sel(0, 0), 'heading2');
     expect(r.text).toBe('## Title');

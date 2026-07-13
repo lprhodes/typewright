@@ -6,6 +6,7 @@ import {
   buildSegments,
   paintSegments,
   applyReveal,
+  shiftMarkerKeys,
   hiddenKeySet,
   reconstructSource,
   offsetOfPoint,
@@ -200,6 +201,30 @@ describe('painting — hidden by default, reveal is a caret-safe class toggle', 
     expect(root.querySelector('script')).toBeNull();
     expect(reconstructSource(root)).toBe(src);
     expect(root.querySelector('code')?.textContent).toBe('<script>');
+  });
+
+  it('shiftMarkerKeys keeps markers hidden across a keystroke (no reveal flash)', () => {
+    // A typed char shifts every downstream marker by +1 in the fresh source. The
+    // painted DOM keeps its OLD keys until the debounced repaint, so the reveal
+    // pass (keyed off the fresh source) would MISS and un-hide the markers — the
+    // flash. shiftMarkerKeys re-aligns the DOM keys so they stay hidden.
+    const src = 'hello **world**';
+    const block = firstBlock(src);
+    const root = paint(block, src, null); // resting: both `**` markers hidden
+    const spans = () => Array.from(root.querySelectorAll('span.tw-syntax'));
+    expect(spans().every((s) => s.classList.contains('tw-syntax--hidden'))).toBe(true);
+
+    // Insert 'X' at offset 2 (inside "hello", away from any marker).
+    shiftMarkerKeys(root, 2, 2, 1);
+
+    const newSrc = 'heXllo **world**';
+    const newBlock = firstBlock(newSrc);
+    // Caret at offset 3 (still inside the word) → every marker should STAY hidden.
+    applyReveal(root, hiddenKeySet(newBlock, newSrc, { from: 3, to: 3 }));
+    expect(
+      spans().every((s) => s.classList.contains('tw-syntax--hidden')),
+      'the fresh-source hidden keys match the shifted DOM keys → no flash',
+    ).toBe(true);
   });
 });
 

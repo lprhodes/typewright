@@ -326,6 +326,14 @@ export function paintSegments(root: HTMLElement, segs: Segment[], hidden: Hidden
       const span = doc.createElement('span');
       span.className = 'tw-syntax';
       span.setAttribute('data-mark', seg.markerKind ?? '');
+      // A list marker keeps its raw source (`- `, `1. `) for exact offsets, but when
+      // hidden it renders a bullet/number in place (the Obsidian live-preview idiom)
+      // — otherwise the list loses its markers at rest. `data-bullet` carries the
+      // glyph the CSS shows: the number for an ordered item, a bullet otherwise.
+      if (seg.markerKind === 'listMarker') {
+        const ordered = /(\d+)[.)]/.exec(seg.text);
+        span.setAttribute('data-bullet', ordered ? `${ordered[1]}.` : '•');
+      }
       const key = markerKeyLocal(seg.from, seg.to, blockFrom);
       span.setAttribute('data-from', String(seg.from - blockFrom));
       span.setAttribute('data-to', String(seg.to - blockFrom));
@@ -348,6 +356,29 @@ export function applyReveal(root: HTMLElement, hidden: Hidden): void {
   spans.forEach((span) => {
     const key = `${span.getAttribute('data-from')}:${span.getAttribute('data-to')}`;
     span.classList.toggle('tw-syntax--hidden', isHidden(hidden, key));
+  });
+}
+
+/**
+ * Keep the painted marker spans' block-local `data-from/to` keys in sync with an
+ * edit, WITHOUT repainting. On each keystroke the surface mutates natively but the
+ * next full repaint is debounced, so between them a marker's painted key is stale
+ * by the edit's delta. The reveal pass (`applyReveal`) matches spans by that key
+ * against the FRESH source's keys — a miss un-hides the marker, so every marker
+ * after the caret flashes visible until the repaint. Shifting the downstream keys
+ * here by the edit delta keeps the two key-spaces aligned, so the reveal stays
+ * correct and there is no flash. `editFrom/editTo/insertLen` are block-local.
+ */
+export function shiftMarkerKeys(root: HTMLElement, editFrom: number, editTo: number, insertLen: number): void {
+  const delta = insertLen - (editTo - editFrom);
+  if (delta === 0) return;
+  root.querySelectorAll<HTMLElement>('span.tw-syntax[data-from]').forEach((span) => {
+    const from = Number(span.getAttribute('data-from'));
+    const to = Number(span.getAttribute('data-to'));
+    if (from >= editTo) {
+      span.setAttribute('data-from', String(from + delta));
+      span.setAttribute('data-to', String(to + delta));
+    }
   });
 }
 
@@ -494,6 +525,9 @@ export function CaretRevealBlock(props: CaretRevealBlockProps): React.ReactEleme
     const prev = blockSrcRef.current;
     if (next === prev) return;
     const sp = computeSplice(prev, next);
+    // Keep the painted marker keys aligned with this edit so the async reveal pass
+    // doesn't misfire and flash the downstream markers before the next repaint.
+    shiftMarkerKeys(root, sp.from, sp.to, sp.insert.length);
     blockSrcRef.current = next; // optimistic; the parent's re-parse confirms it
     const base = blockFromRef.current;
     onChangeRef.current({ from: base + sp.from, to: base + sp.to, insert: sp.insert });
@@ -746,5 +780,11 @@ export const CARET_REVEAL_CSS = `
 /* Hidden marker: collapsed out of layout, but its source chars stay in the DOM
    (and in this component's offset mapping) — never removed from the string. */
 .tw-syntax--hidden{display:none}
+/* A hidden LIST marker is the exception: its raw source ('- ', '1. ') stays present
+   but zero-width (offsets stay exact), and a bullet/number glyph renders in its
+   place, so a bulleted/numbered list keeps its markers at rest (live-preview).
+   Revealing the marker (caret on it) restores the raw glyphs. */
+.tw-caret-block .tw-syntax[data-mark="listMarker"].tw-syntax--hidden{display:inline;font-size:0}
+.tw-caret-block .tw-syntax[data-mark="listMarker"].tw-syntax--hidden::before{content:attr(data-bullet) "\\2002";font-size:1rem;color:var(--tw-muted)}
 @media (prefers-reduced-motion: reduce){ .tw-caret-block{transition:none} }
 `;
