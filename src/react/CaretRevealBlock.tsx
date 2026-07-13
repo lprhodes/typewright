@@ -359,6 +359,29 @@ export function applyReveal(root: HTMLElement, hidden: Hidden): void {
   });
 }
 
+/**
+ * Keep the painted marker spans' block-local `data-from/to` keys in sync with an
+ * edit, WITHOUT repainting. On each keystroke the surface mutates natively but the
+ * next full repaint is debounced, so between them a marker's painted key is stale
+ * by the edit's delta. The reveal pass (`applyReveal`) matches spans by that key
+ * against the FRESH source's keys — a miss un-hides the marker, so every marker
+ * after the caret flashes visible until the repaint. Shifting the downstream keys
+ * here by the edit delta keeps the two key-spaces aligned, so the reveal stays
+ * correct and there is no flash. `editFrom/editTo/insertLen` are block-local.
+ */
+export function shiftMarkerKeys(root: HTMLElement, editFrom: number, editTo: number, insertLen: number): void {
+  const delta = insertLen - (editTo - editFrom);
+  if (delta === 0) return;
+  root.querySelectorAll<HTMLElement>('span.tw-syntax[data-from]').forEach((span) => {
+    const from = Number(span.getAttribute('data-from'));
+    const to = Number(span.getAttribute('data-to'));
+    if (from >= editTo) {
+      span.setAttribute('data-from', String(from + delta));
+      span.setAttribute('data-to', String(to + delta));
+    }
+  });
+}
+
 /* ------------------------------------------------------------------ *
  * Component
  * ------------------------------------------------------------------ */
@@ -502,6 +525,9 @@ export function CaretRevealBlock(props: CaretRevealBlockProps): React.ReactEleme
     const prev = blockSrcRef.current;
     if (next === prev) return;
     const sp = computeSplice(prev, next);
+    // Keep the painted marker keys aligned with this edit so the async reveal pass
+    // doesn't misfire and flash the downstream markers before the next repaint.
+    shiftMarkerKeys(root, sp.from, sp.to, sp.insert.length);
     blockSrcRef.current = next; // optimistic; the parent's re-parse confirms it
     const base = blockFromRef.current;
     onChangeRef.current({ from: base + sp.from, to: base + sp.to, insert: sp.insert });
